@@ -158,6 +158,10 @@ if (NOT SKIP_FCITX5)
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
     PREFIX ""
+    # A distinct addon id, so this build is identifiable in the addon list and
+    # can sit next to the stock package's addon. The trigger key still lives in
+    # conf/im-emoji-picker.conf, which the module reads by a fixed path.
+    OUTPUT_NAME "fcitx5imemojipicker-handwriting"
   )
 
   target_link_libraries(fcitx5imemojipicker
@@ -169,7 +173,7 @@ if (NOT SKIP_FCITX5)
   )
 
   install(TARGETS fcitx5imemojipicker LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/fcitx5)
-  install(FILES ${PROJECT_SOURCE_DIR}/fcitx5-addon.conf DESTINATION ${CMAKE_INSTALL_PREFIX}/share/fcitx5/addon RENAME fcitx5imemojipicker.conf)
+  install(FILES ${PROJECT_SOURCE_DIR}/fcitx5-addon.conf DESTINATION ${CMAKE_INSTALL_PREFIX}/share/fcitx5/addon RENAME fcitx5imemojipicker-handwriting.conf)
   install(FILES ${PROJECT_SOURCE_DIR}/src/res/im-emoji-picker_32x32.png DESTINATION ${CMAKE_INSTALL_PREFIX}/share/icons/hicolor/32x32/apps RENAME im-emoji-picker.png)
   install(CODE "execute_process(COMMAND touch /usr/share/icons/hicolor)")
 endif ()
