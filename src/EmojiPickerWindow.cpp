@@ -143,12 +143,31 @@ EmojiPickerWindow::EmojiPickerWindow() : QMainWindow() {
   _handwritingModeLabel->setHighlighted(_mode == ViewMode::HANDWRITING);
 
   _statusBar->setFixedHeight(20);
+  // The window is fixed-size, so the grip is useless and would eat clicks on
+  // the rightmost indicator.
+  _statusBar->setSizeGripEnabled(false);
   _statusBar->addPermanentWidget(_mruModeLabel);
   _statusBar->addPermanentWidget(_listModeLabel);
   _statusBar->addPermanentWidget(_kaomojiModeLabel);
   _statusBar->addPermanentWidget(_handwritingModeLabel);
 
   setStatusBar(_statusBar);
+
+  // The status bar shows the four views; clicking one switches to it. Their
+  // tooltips ("favorites", "emoji list", "kaomoji list", "handwriting") come
+  // from EmojiLabel.
+  const std::pair<EmojiLabel*, ViewMode> modeLabels[] = {
+    {_mruModeLabel, ViewMode::MRU},
+    {_listModeLabel, ViewMode::LIST},
+    {_kaomojiModeLabel, ViewMode::KAOMOJI},
+    {_handwritingModeLabel, ViewMode::HANDWRITING},
+  };
+  for (const auto& [label, mode] : modeLabels) {
+    label->setCursor(Qt::PointingHandCursor);
+    QObject::connect(label, &EmojiLabel::mousePressed, [this, mode]() {
+      setViewMode(mode);
+    });
+  }
 
   QObject::connect(_handwritingPanel, &HandwritingPanel::commitRequested, [this](const QString& text) {
     commitText(text.toStdString());
@@ -529,6 +548,21 @@ void EmojiPickerWindow::updateEmojiList() {
   updateSearchCompletion();
 }
 
+void EmojiPickerWindow::setViewMode(ViewMode mode) {
+  _mode = mode;
+
+  _mruModeLabel->setHighlighted(_mode == ViewMode::MRU);
+  _listModeLabel->setHighlighted(_mode == ViewMode::LIST);
+  _kaomojiModeLabel->setHighlighted(_mode == ViewMode::KAOMOJI);
+  _handwritingModeLabel->setHighlighted(_mode == ViewMode::HANDWRITING);
+
+  applyMode();
+
+  if (_mode != ViewMode::HANDWRITING) {
+    updateEmojiList();
+  }
+}
+
 void EmojiPickerWindow::applyMode() {
   const bool handwriting = _mode == ViewMode::HANDWRITING;
 
@@ -568,7 +602,10 @@ void EmojiPickerWindow::enable(bool resetPosition) {
   _emojiMRU = EmojiPickerCache{}.emojiMRU();
 
   applyMode();
-  updateEmojiList();
+
+  if (_mode != ViewMode::HANDWRITING) {
+    updateEmojiList();
+  }
 }
 
 void EmojiPickerWindow::changeEvent(QEvent* event) {
@@ -586,14 +623,14 @@ void EmojiPickerWindow::disable() {
 
   resetInputMethodEngine();
 
-  _mode = ViewMode::MRU;
+  _mode = ViewMode::HANDWRITING;
   _searchEdit->setText("");
   _searchCompletion->setText("");
 
-  _mruModeLabel->setHighlighted(true);
+  _mruModeLabel->setHighlighted(false);
   _listModeLabel->setHighlighted(false);
   _kaomojiModeLabel->setHighlighted(false);
-  _handwritingModeLabel->setHighlighted(false);
+  _handwritingModeLabel->setHighlighted(true);
   _handwritingPanel->clear();
   applyMode();
 
@@ -867,18 +904,7 @@ void EmojiPickerWindow::processKeyEvent(const QKeyEvent* event, EmojiAction acti
     }
 
     const int step = (event->modifiers() & Qt::ShiftModifier) ? -1 : 1;
-    _mode = order[((index + step) % count + count) % count];
-
-    _mruModeLabel->setHighlighted(_mode == ViewMode::MRU);
-    _listModeLabel->setHighlighted(_mode == ViewMode::LIST);
-    _kaomojiModeLabel->setHighlighted(_mode == ViewMode::KAOMOJI);
-    _handwritingModeLabel->setHighlighted(_mode == ViewMode::HANDWRITING);
-
-    applyMode();
-
-    if (_mode != ViewMode::HANDWRITING) {
-      updateEmojiList();
-    }
+    setViewMode(order[((index + step) % count + count) % count]);
     break;
   }
 

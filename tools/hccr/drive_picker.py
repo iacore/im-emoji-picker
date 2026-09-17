@@ -1,8 +1,9 @@
 """End-to-end check of the handwriting pad against the real window.
 
-Starts an X server, runs the picker harness, switches to the handwriting view,
-draws a character with actual mouse events (xdotool), and commits the top
-candidate with a keystroke. Screenshots are kept for inspection.
+Starts an X server, runs the picker harness, and drives it the way a user
+would: asserts the pad is what the picker opens with, draws a character with
+actual mouse events, commits a candidate with a keystroke, and switches views
+by clicking the status bar indicators. Screenshots are kept for inspection.
 
   python3 drive_picker.py --char 休
 """
@@ -11,11 +12,12 @@ from __future__ import annotations
 
 import argparse
 import os
-import select
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import threading
 
 import numpy as np
 from PIL import Image
@@ -27,6 +29,8 @@ from render_strokes import STROKE_BOX, load_medians  # noqa: E402
 REPO = Path(__file__).resolve().parents[2]
 DISPLAY = ":97"
 SCREEN = "1280x1024x24"
+PAD_VIEW_HEIGHT = 280
+EMOJI_VIEW_HEIGHT = 190
 
 
 def run(command, env, check=True):
@@ -49,6 +53,22 @@ def screenshot(env, path):
     return path
 
 
+def window_rect(env, window):
+    geometry = run(["xdotool", "getwindowgeometry", "--shell", window], env).stdout
+    values = dict(line.split("=", 1) for line in geometry.strip().splitlines() if "=" in line)
+    return int(values["X"]), int(values["Y"]), int(values["WIDTH"]), int(values["HEIGHT"])
+
+
+def wait_for_height(env, window, expected, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if window_rect(env, window)[3] == expected:
+            time.sleep(0.3)
+            return True
+        time.sleep(0.15)
+    return False
+
+
 def ink_rect(path):
     """Bounding box of the white ink pad, found by looking for white rows."""
     gray = np.asarray(Image.open(path).convert("L"))
@@ -58,6 +78,22 @@ def ink_rect(path):
     if rows.size == 0 or columns.size == 0:
         raise RuntimeError("no ink pad found in the screenshot")
     return int(columns.min()), int(rows.min()), int(columns.max()), int(rows.max())
+
+
+def click(env, x, y):
+    run(["xdotool", "mousemove", str(int(x)), str(int(y)), "click", "1"], env)
+    time.sleep(0.35)
+
+
+def click_indicator(env, window, target_height):
+    """Click status bar indicators until the window takes the wanted height."""
+    x, y, width, height = window_rect(env, window)
+    for dy in (9, 11, 13, 7, 15):
+        for dx in (16, 20, 25, 30, 36, 43, 52, 62, 74, 88, 104):
+            click(env, x + width - dx, y + height - dy)
+            if window_rect(env, window)[3] == target_height:
+                return dx, dy
+    raise RuntimeError(f"no status bar indicator switched the window to {target_height}px")
 
 
 def draw(env, medians, rect, inset_ratio=0.08):
@@ -91,41 +127,35 @@ def send(app, line):
     time.sleep(0.25)
 
 
-def drain(app, timeout=3.0):
-    lines = []
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        ready, _, _ = select.select([app.stdout], [], [], 0.2)
-        if not ready:
-            continue
-        line = app.stdout.readline()
-        if not line:
-            break
-        lines.append(line.rstrip())
+def collect_output(app):
+    """Read the harness output in a thread: select() on the pipe misses lines
+    that Python has already buffered, which silently hides commits."""
+    collected: list[str] = []
+
+    def reader():
+        for line in app.stdout:
+            collected.append(line.rstrip())
+
+    threading.Thread(target=reader, daemon=True).start()
+    return collected
+
+
+def drain(app, collected, timeout=2.0):
+    time.sleep(timeout)
+    lines = list(collected)
+    collected.clear()
     return lines
 
 
-def window_size(env, window):
-    geometry = run(["xdotool", "getwindowgeometry", "--shell", window], env).stdout
-    values = dict(line.split("=", 1) for line in geometry.strip().splitlines() if "=" in line)
-    return int(values["WIDTH"]), int(values["HEIGHT"])
-
-
-def wait_for_size(env, window, expected_height, timeout=5.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if window_size(env, window)[1] == expected_height:
-            time.sleep(0.3)
-            return True
-        time.sleep(0.15)
-    return False
+def commits_in(lines):
+    return [line.split(" ", 1)[1] for line in lines if line.startswith("COMMIT ")]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--char", default="休")
     parser.add_argument("--model", type=Path, default=REPO / "models/hccr/hccr-mobilenetv2.gguf")
-    parser.add_argument("--picker", type=Path, default=REPO / "build/picker-gui")
+    parser.add_argument("--picker", type=Path, default=REPO / "build-usr/picker-gui")
     parser.add_argument("--out", type=Path, default=REPO / "build/picker-test")
     parser.add_argument("--data-dir", type=Path, default=Path.home() / "computing/extension/hanzi-strokes/package")
     args = parser.parse_args()
@@ -142,63 +172,62 @@ def main() -> int:
     try:
         time.sleep(0.7)
         app = subprocess.Popen([str(args.picker)], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        collected = collect_output(app)
 
         window = wait_for_window(env)
-        geometry = run(["xdotool", "getwindowgeometry", "--shell", window], env).stdout
-        print("window geometry:")
-        print(geometry.strip())
 
-        for _ in range(3):  # MRU -> LIST -> KAOMOJI -> HANDWRITING
-            send(app, "key tab")
+        # 1. The pad is what the picker opens with - no keystroke involved.
+        if not wait_for_height(env, window, PAD_VIEW_HEIGHT):
+            print(f"FAIL: picker opened at {window_rect(env, window)} instead of the pad view")
+            return 1
+        print(f"window {window}: {window_rect(env, window)}")
+        screenshot(env, args.out / "1-opened-with-pad.png")
+        rect = ink_rect(args.out / "1-opened-with-pad.png")
+        print(f"PASS: pad visible on open, ink area {rect} ({rect[2] - rect[0]}x{rect[3] - rect[1]})")
 
-        if not wait_for_size(env, window, 280):
-            raise RuntimeError(f"the window did not switch to the handwriting view (size {window_size(env, window)})")
-
-        screenshot(env, args.out / "1-handwriting-view.png")
-        rect = ink_rect(args.out / "1-handwriting-view.png")
-        print(f"ink pad at {rect} ({rect[2] - rect[0]}x{rect[3] - rect[1]})")
-
+        # 2. Draw with the mouse and commit the top candidate with a digit.
         draw(env, medians, rect)
         time.sleep(0.6)
         screenshot(env, args.out / "2-after-strokes.png")
 
         send(app, "key 1")
         time.sleep(0.4)
-        screenshot(env, args.out / "3-after-commit.png")
 
-        lines = drain(app)
-        print("harness output:")
-        for line in lines:
-            print(f"  {line}")
-
-        commits = [line.split(" ", 1)[1] for line in lines if line.startswith("COMMIT ")]
-        print()
-        if not commits:
+        drawn = commits_in(drain(app, collected))
+        if not drawn:
             print(f"FAIL: nothing committed while drawing {args.char}")
+            for line in lines:
+                print(f"  harness said: {line}")
             return 1
-        if commits[0] != args.char:
-            print(f"FAIL: drew {args.char}, pad committed {commits[0]}")
+        if drawn[0] != args.char:
+            print(f"FAIL: drew {args.char}, pad committed {drawn[0]}")
             return 1
-        print(f"PASS: drew {args.char} with the mouse, pad committed {commits[0]}")
+        print(f"PASS: drew {args.char} with the mouse, pad committed {drawn[0]}")
 
-        # Second round: the pad cleared itself, so draw again and commit through
-        # the keyboard (arrow selection + Enter) instead of the number key.
+        # 3. Same again, committed through arrow selection and Enter.
         draw(env, medians, rect)
         time.sleep(0.6)
         send(app, "key down")
         send(app, "key return")
         time.sleep(0.4)
-        screenshot(env, args.out / "4-keyboard-commit.png")
 
-        keyboard_lines = drain(app)
-        keyboard_commits = [line.split(" ", 1)[1] for line in keyboard_lines if line.startswith("COMMIT ")]
-        if not keyboard_commits:
-            print("FAIL: selecting a candidate with the arrow keys and Enter committed nothing")
+        picked = commits_in(drain(app, collected))
+        if not picked:
+            print("FAIL: arrow keys + Enter committed nothing")
             return 1
-        if keyboard_commits[0] == commits[0]:
-            print(f"FAIL: arrow-down did not move the selection (still {keyboard_commits[0]})")
+        if picked[0] == drawn[0]:
+            print(f"FAIL: arrow-down did not move the selection (still {picked[0]})")
             return 1
-        print(f"PASS: arrow-down + Enter committed the second candidate {keyboard_commits[0]}")
+        print(f"PASS: arrow-down + Enter committed the second candidate {picked[0]}")
+
+        # 4. Status bar indicators switch views when clicked.
+        emoji_dx = click_indicator(env, window, EMOJI_VIEW_HEIGHT)
+        screenshot(env, args.out / "3-clicked-emoji-indicator.png")
+        print(f"PASS: clicking a status indicator at -{emoji_dx[0]}px,-{emoji_dx[1]}px left the pad view")
+
+        pen_dx = click_indicator(env, window, PAD_VIEW_HEIGHT)
+        screenshot(env, args.out / "4-clicked-pen-indicator.png")
+        print(f"PASS: clicking the pen indicator at -{pen_dx[0]}px,-{pen_dx[1]}px returned to the pad")
         return 0
     finally:
         if app is not None:
