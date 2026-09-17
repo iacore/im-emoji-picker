@@ -60,6 +60,9 @@ public:
 
   std::unordered_map<char, QKeySequence> customHotKeys();
   void customHotKeys(const std::unordered_map<char, QKeySequence>& customHotKeys);
+
+  std::string handwritingModelPath() const;
+  void handwritingModelPath(const std::string& handwritingModelPath);
 };
 
 class EmojiPickerCache : public QSettings {

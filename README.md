@@ -72,6 +72,66 @@ Download a `-fedora-*.rpm` from [/releases](https://github.com/GaZaTu/im-emoji-p
 
 *Note: There are [nightly releases](https://github.com/GaZaTu/im-emoji-picker/releases/tag/nightly-build) aswell which are rebuilt on every push to master*
 
+## Handwriting (Hanzi) ✍
+
+Press `Tab` until the status bar highlights `✍` and the picker switches to the handwriting view: a square pad where you write one character with the mouse or a stylus, and a row with the ten most likely characters.
+
+| key | action |
+| --- | --- |
+| `Tab` / `Shift+Tab` | cycle the views (favorites, emoji list, kaomoji, handwriting) |
+| `1`-`9` | insert that candidate |
+| `←` `↑` `↓` `→` | move the highlighted candidate |
+| `Enter` | insert the highlighted candidate |
+| `Backspace` | undo the last stroke |
+| `Ctrl+Backspace` | clear the pad |
+| `Esc` | close the picker |
+
+Recognition is a 3755-class MobileNetV2 over the GB2312 level-1 set, running on [ggml](https://github.com/ggml-org/ggml). It is CPU only, loads on first use, and takes about 15 ms per character. Only Hanzi are covered so far; emoji and kaomoji are untouched.
+
+### Building with handwriting
+
+```sh
+# ggml must be discoverable; when built as a static library, build it with
+# -DCMAKE_POSITION_INDEPENDENT_CODE=ON so it can go into the addon
+cmake -B build -DCMAKE_PREFIX_PATH=/path/to/ggml/install
+cmake --build build
+```
+
+Three targets are produced: `fcitx5imemojipicker.so`, the IBus engine, and
+`picker-gui` (a development harness that runs the window on its own).
+
+### The model file
+
+The weights are not vendored. `tools/hccr` downloads the upstream Apache-2.0
+checkpoint, folds the BatchNorm layers, and writes a GGUF with the character set
+and topology embedded:
+
+```sh
+python3 tools/hccr/fetch_model.py
+PYTHONPATH=/path/to/llama.cpp/gguf-py python3 tools/hccr/convert_to_gguf.py
+```
+
+Installing puts it in `<prefix>/share/im-emoji-picker/hccr-mobilenetv2.gguf`.
+To use another location, set the `handwritingModelPath` setting or the
+`IM_EMOJI_PICKER_HCCR_MODEL` environment variable.
+
+### Measuring it
+
+The harness reports numbers rather than impressions. `tools/hccr/hccr_model.py`
+is a numpy reference implementation of the same network, and everything else is
+checked against it:
+
+```sh
+python3 tools/hccr/eval_accuracy.py          # reference accuracy over stroke widths
+python3 tools/hccr/make_test_inputs.py       # test bitmaps, raw and normalized
+python3 tools/hccr/convert_to_gguf.py        # produce the model
+python3 tools/hccr/verify_gguf.py            # GGUF reproduces the reference logits
+python3 tools/hccr/compare_ggml.py           # ggml reproduces them on normalized input
+python3 tools/hccr/compare_ggml.py --preprocess   # and after the C++ normalization
+python3 tools/hccr/eval_runtime.py           # accuracy of the shipped C++ path
+python3 tools/hccr/drive_picker.py --char 休 # drives the real window under Xvfb
+```
+
 ## Setup 😅
 
 After installing *I'm Emoji Picker* theres some steps required to make it work.

@@ -98,6 +98,8 @@ void moveQWidgetToCenter(QWidget* window);
 
 void moveQWidgetToPoint(QWidget* window, QPoint windowPoint);
 
+class HandwritingPanel;
+
 struct EmojiPickerWindow : public QMainWindow {
   Q_OBJECT
 
@@ -153,6 +155,9 @@ private:
   EmojiLabel* _mruModeLabel = new EmojiLabel(_statusBar, _settings);
   EmojiLabel* _listModeLabel = new EmojiLabel(_statusBar, _settings);
   EmojiLabel* _kaomojiModeLabel = new EmojiLabel(_statusBar, _settings);
+  EmojiLabel* _handwritingModeLabel = new EmojiLabel(_statusBar, _settings);
+
+  HandwritingPanel* _handwritingPanel = nullptr;
 
   void addItemToEmojiList(QLayoutItem* emojiLayoutItem, EmojiLabel* label, int colspan, int& row, int& column);
 
@@ -178,9 +183,12 @@ private:
     MRU,
     LIST,
     KAOMOJI,
+    HANDWRITING,
   };
 
   ViewMode _mode = ViewMode::MRU;
+
+  void applyMode();
 
   void commitEmoji(const Emoji& emoji, bool isRealEmoji, bool closeAfter);
 

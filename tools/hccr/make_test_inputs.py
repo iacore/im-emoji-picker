@@ -35,6 +35,10 @@ def main() -> None:
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
+    raw_dir = args.out / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    for stale in list(args.out.glob("*.png")) + list(raw_dir.glob("*.png")):
+        stale.unlink()
     model = MobileNetV2HCCR(args.checkpoint, args.charset)
 
     ordered = sorted(model.index_to_char.items())
@@ -47,15 +51,18 @@ def main() -> None:
         medians = load_medians(character, args.data_dir)
         if medians is None:
             continue
-        normalized = normalize_bitmap(render_medians(medians, size=args.size, stroke_width=args.width))
+        rendered = render_medians(medians, size=args.size, stroke_width=args.width)
+        normalized = normalize_bitmap(rendered)
         name = f"{len(index):02d}_{character}.png"
+        # the raw bitmap exercises the C++ normalization, the normalized one the ggml graph
+        Image.fromarray(rendered).save(raw_dir / name)
         Image.fromarray(normalized).save(args.out / name)
         logits.append(model.forward(preprocess(normalized)))
         index.append({"file": name, "character": character})
 
     np.save(args.out / "logits.npy", np.stack(logits))
     (args.out / "index.json").write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"wrote {len(index)} bitmaps and logits.npy to {args.out}")
+    print(f"wrote {len(index)} bitmaps (plus raw/ for the preprocessing check) and logits.npy to {args.out}")
 
 
 if __name__ == "__main__":

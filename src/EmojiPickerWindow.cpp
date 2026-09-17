@@ -1,5 +1,6 @@
 #include "EmojiPickerWindow.hpp"
 #include "EmojiLabel.hpp"
+#include "HandwritingPanel.hpp"
 #include "emojis.hpp"
 #include "kaomojis.hpp"
 #include <QApplication>
@@ -123,6 +124,11 @@ EmojiPickerWindow::EmojiPickerWindow() : QMainWindow() {
   _centralLayout->setContentsMargins(0, 0, 0, 0);
   _centralLayout->setSpacing(0);
   _centralLayout->addWidget(_searchContainerWidget);
+
+  _handwritingPanel = new HandwritingPanel{_settings, _centralWidget};
+  _handwritingPanel->hide();
+  _centralLayout->addWidget(_handwritingPanel);
+
   _centralLayout->addWidget(_emojiListScroll, 1);
 
   setCentralWidget(_centralWidget);
@@ -133,13 +139,26 @@ EmojiPickerWindow::EmojiPickerWindow() : QMainWindow() {
   _listModeLabel->setHighlighted(_mode == ViewMode::LIST);
   _kaomojiModeLabel->setEmoji({"kaomoji list", "ヽ(o^ ^o)ﾉ"}, 18, 18);
   _kaomojiModeLabel->setHighlighted(_mode == ViewMode::KAOMOJI);
+  _handwritingModeLabel->setEmoji({"handwriting", "✍"}, 24, 24);
+  _handwritingModeLabel->setHighlighted(_mode == ViewMode::HANDWRITING);
 
   _statusBar->setFixedHeight(20);
   _statusBar->addPermanentWidget(_mruModeLabel);
   _statusBar->addPermanentWidget(_listModeLabel);
   _statusBar->addPermanentWidget(_kaomojiModeLabel);
+  _statusBar->addPermanentWidget(_handwritingModeLabel);
 
   setStatusBar(_statusBar);
+
+  QObject::connect(_handwritingPanel, &HandwritingPanel::commitRequested, [this](const QString& text) {
+    commitText(text.toStdString());
+
+    _handwritingPanel->clear();
+
+    if (_settings.closeAfterFirstInput()) {
+      disable();
+    }
+  });
 
   int emojisLength = sizeof(emojis) / sizeof(Emoji);
   int kaomojisLength = sizeof(kaomojis) / sizeof(Kaomoji);
@@ -510,6 +529,20 @@ void EmojiPickerWindow::updateEmojiList() {
   updateSearchCompletion();
 }
 
+void EmojiPickerWindow::applyMode() {
+  const bool handwriting = _mode == ViewMode::HANDWRITING;
+
+  _searchContainerWidget->setVisible(!handwriting);
+  _emojiListScroll->setVisible(!handwriting);
+  _handwritingPanel->setVisible(handwriting);
+
+  setFixedSize(340, handwriting ? 280 : 190);
+
+  if (handwriting) {
+    _handwritingPanel->activate();
+  }
+}
+
 void EmojiPickerWindow::reset() {
   disable();
 }
@@ -534,6 +567,7 @@ void EmojiPickerWindow::enable(bool resetPosition) {
 
   _emojiMRU = EmojiPickerCache{}.emojiMRU();
 
+  applyMode();
   updateEmojiList();
 }
 
@@ -555,6 +589,13 @@ void EmojiPickerWindow::disable() {
   _mode = ViewMode::MRU;
   _searchEdit->setText("");
   _searchCompletion->setText("");
+
+  _mruModeLabel->setHighlighted(true);
+  _listModeLabel->setHighlighted(false);
+  _kaomojiModeLabel->setHighlighted(false);
+  _handwritingModeLabel->setHighlighted(false);
+  _handwritingPanel->clear();
+  applyMode();
 
   EmojiPickerCache{}.emojiMRU(_emojiMRU);
 
@@ -737,6 +778,54 @@ void EmojiPickerWindow::processKeyEvent(const QKeyEvent* event, EmojiAction acti
     action = getEmojiActionForQKeyEvent(event);
   }
 
+  // In the handwriting view the pad owns the cursor keys, Enter and Backspace;
+  // digits pick a candidate the way a Chinese IME does.
+  if (_mode == ViewMode::HANDWRITING && _handwritingPanel) {
+    switch (action) {
+    case EmojiAction::UP:
+    case EmojiAction::LEFT:
+      _handwritingPanel->selectNext(-1);
+      return;
+
+    case EmojiAction::DOWN:
+    case EmojiAction::RIGHT:
+      _handwritingPanel->selectNext(1);
+      return;
+
+    case EmojiAction::PAGE_UP:
+      _handwritingPanel->selectNext(-5);
+      return;
+
+    case EmojiAction::PAGE_DOWN:
+      _handwritingPanel->selectNext(5);
+      return;
+
+    case EmojiAction::COMMIT_EMOJI:
+      _handwritingPanel->commitSelected();
+      return;
+
+    case EmojiAction::REMOVE_CHAR_IN_SEARCH:
+      _handwritingPanel->undoStroke();
+      return;
+
+    case EmojiAction::CLEAR_SEARCH:
+      _handwritingPanel->clear();
+      return;
+
+    case EmojiAction::INSERT_CHAR_IN_SEARCH: {
+      const QString text = event->text();
+      if (text.size() == 1 && text.at(0) >= QLatin1Char('1') && text.at(0) <= QLatin1Char('9')) {
+        _handwritingPanel->commitCandidate(text.at(0).digitValue() - 1);
+      }
+      // anything else is not meaningful for a pad; do not touch the (hidden) search field
+      return;
+    }
+
+    default:
+      break;
+    }
+  }
+
   switch (action) {
   case EmojiAction::INVALID:
     break;
@@ -766,37 +855,32 @@ void EmojiPickerWindow::processKeyEvent(const QKeyEvent* event, EmojiAction acti
     }
     break;
 
-  case EmojiAction::SWITCH_VIEW_MODE:
-    if (event->modifiers() & Qt::ShiftModifier) {
-      switch (_mode) {
-      case ViewMode::MRU:
-        _mode = ViewMode::KAOMOJI;
-        break;
-      case ViewMode::LIST:
-        _mode = ViewMode::MRU;
-        break;
-      case ViewMode::KAOMOJI:
-        _mode = ViewMode::LIST;
-        break;
-      }
-    } else {
-      switch (_mode) {
-      case ViewMode::MRU:
-        _mode = ViewMode::LIST;
-        break;
-      case ViewMode::LIST:
-        _mode = ViewMode::KAOMOJI;
-        break;
-      case ViewMode::KAOMOJI:
-        _mode = ViewMode::MRU;
-        break;
+  case EmojiAction::SWITCH_VIEW_MODE: {
+    static const ViewMode order[] = {ViewMode::MRU, ViewMode::LIST, ViewMode::KAOMOJI, ViewMode::HANDWRITING};
+    const int count = static_cast<int>(sizeof(order) / sizeof(order[0]));
+
+    int index = 0;
+    for (int i = 0; i < count; ++i) {
+      if (order[i] == _mode) {
+        index = i;
       }
     }
+
+    const int step = (event->modifiers() & Qt::ShiftModifier) ? -1 : 1;
+    _mode = order[((index + step) % count + count) % count];
+
     _mruModeLabel->setHighlighted(_mode == ViewMode::MRU);
     _listModeLabel->setHighlighted(_mode == ViewMode::LIST);
     _kaomojiModeLabel->setHighlighted(_mode == ViewMode::KAOMOJI);
-    updateEmojiList();
+    _handwritingModeLabel->setHighlighted(_mode == ViewMode::HANDWRITING);
+
+    applyMode();
+
+    if (_mode != ViewMode::HANDWRITING) {
+      updateEmojiList();
+    }
     break;
+  }
 
   case EmojiAction::UP:
     moveSelectedEmojiLabel(-1, 0);

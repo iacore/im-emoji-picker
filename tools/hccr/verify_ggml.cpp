@@ -19,7 +19,9 @@ int main(int argc, char** argv) {
 
   std::string modelPath;
   std::string dumpPath;
+  std::string saveDirectory;
   std::vector<std::string> images;
+  bool preprocess = false;
   int count = 10;
 
   for (int i = 1; i < argc; ++i) {
@@ -28,6 +30,10 @@ int main(int argc, char** argv) {
       modelPath = argv[++i];
     } else if (argument == "--dump" && i + 1 < argc) {
       dumpPath = argv[++i];
+    } else if (argument == "--save-normalized" && i + 1 < argc) {
+      saveDirectory = argv[++i];
+    } else if (argument == "--preprocess") {
+      preprocess = true;
     } else if (argument == "-k" && i + 1 < argc) {
       count = std::atoi(argv[++i]);
     } else {
@@ -36,7 +42,7 @@ int main(int argc, char** argv) {
   }
 
   if (modelPath.empty() || images.empty()) {
-    std::fprintf(stderr, "usage: hccr-verify --model <model.gguf> [--dump logits.bin] [-k N] <image.png>...\n");
+    std::fprintf(stderr, "usage: hccr-verify --model <model.gguf> [--preprocess] [--dump logits.bin] [--save-normalized DIR] [-k N] <image.png>...\n");
     return 2;
   }
 
@@ -66,7 +72,13 @@ int main(int argc, char** argv) {
     }
     image = image.convertToFormat(QImage::Format_Grayscale8);
 
-    const std::vector<float> logits = recognizer->logitsNormalized(image.constBits(), static_cast<int>(image.bytesPerLine()));
+    const QImage prepared = preprocess ? HccrRecognizer::normalize(image) : image;
+    if (!saveDirectory.empty()) {
+      const std::string base = path.substr(path.find_last_of('/') + 1);
+      prepared.save(QString::fromStdString(saveDirectory + "/" + base + ".normalized.png"));
+    }
+
+    const std::vector<float> logits = recognizer->logitsNormalized(prepared.constBits(), static_cast<int>(prepared.bytesPerLine()));
     if (logits.empty()) {
       std::fprintf(stderr, "inference failed for %s\n", path.c_str());
       return 1;
@@ -75,10 +87,10 @@ int main(int argc, char** argv) {
       dump.write(reinterpret_cast<const char*>(logits.data()), static_cast<std::streamsize>(logits.size() * sizeof(float)));
     }
 
-    const std::vector<HccrCandidate> candidates = recognizer->recognizeNormalized(image.constBits(), static_cast<int>(image.bytesPerLine()), count);
+    const std::vector<HccrCandidate> candidates = recognizer->recognizeNormalized(prepared.constBits(), static_cast<int>(prepared.bytesPerLine()), count);
     totalMilliseconds += recognizer->lastInferenceMilliseconds();
 
-    std::printf("%s ->", path.c_str());
+    std::printf("%s (%dx%d)%s ->", path.c_str(), image.width(), image.height(), preprocess ? " normalized" : "");
     for (const HccrCandidate& candidate : candidates) {
       std::printf(" %s %.2f%%", candidate.character.c_str(), candidate.probability * 100.0f);
     }
