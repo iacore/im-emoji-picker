@@ -1,0 +1,15 @@
+# Install the handwriting build of the emoji picker.
+#
+# 1. ggml is required at runtime and is in [extra]:
+sudo pacman -S ggml
+
+# 2. Install the package. It conflicts with fcitx5-im-emoji-picker-git, so
+#    pacman will ask to remove that one first; your configuration in
+#    ~/.config/fcitx5 (including the Super+E trigger) is not touched.
+sudo pacman -U /home/user/computing/extension/im-emoji-picker/packaging/fcitx5-im-emoji-picker-handwriting-git-1.1.1.r103.g2ab0633-1-x86_64.pkg.tar.zst
+
+# 3. Restart fcitx5 (dinit manages it on this machine, otherwise: fcitx5 -r -d)
+dinitctl restart fcitx5
+
+# 4. Super+E opens the picker, Tab three times switches to the pad (the status
+#    bar shows a pen), then write one character with the mouse or stylus.
