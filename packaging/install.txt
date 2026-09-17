@@ -3,7 +3,7 @@
 # 1. Install the package. It replaces the stock fcitx5-im-emoji-picker-git
 #    (pacman asks first); ~/.config/fcitx5, including the Super+E trigger, is
 #    not touched.
-sudo pacman -U /home/user/computing/extension/im-emoji-picker/packaging/fcitx5-im-emoji-picker-handwriting-git-1.1.1.r108.gb6d919a-1-x86_64.pkg.tar.zst
+sudo pacman -U /home/user/computing/extension/im-emoji-picker/packaging/fcitx5-im-emoji-picker-handwriting-git-1.1.1.r110.ga1fdf19-1-x86_64.pkg.tar.zst
 
 # 2. A running fcitx5 keeps the library it mapped at startup, which is the file
 #    the upgrade replaced. There are currently two instances: the
@@ -16,7 +16,7 @@ pkill -x fcitx5
 #    fcitx5imemojipicker-handwriting.so and libggml, and no "(deleted)".
 for p in $(pgrep -x fcitx5); do echo "pid $p"; ls -l /proc/$p/map_files/ | grep -iE 'imemojipicker|libggml' | sed 's/.*-> //' | sort -u; done
 
-# 4. Super+E opens the picker directly on the handwriting pad. Write with the
-#    mouse or a stylus, then click a candidate or press 1-9 / arrows + Enter.
-#    The four status bar indicators switch views and are clickable; Tab cycles
-#    them too.
+# 4. Super+E opens the picker on the emoji view. Reach the pad by clicking the
+#    pen indicator or with Shift+Tab. Write with the mouse or a stylus, then
+#    click a candidate or press 1-9 / arrows + Enter. Wipe the pad with a right
+#    click, the Clear button, or Ctrl+Backspace.
