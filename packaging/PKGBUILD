@@ -6,7 +6,7 @@
 # configuration in ~/.config/fcitx5 is untouched.
 
 pkgname=fcitx5-im-emoji-picker-handwriting-git
-pkgver=1.1.1.r103.g2ab0633
+pkgver=1.1.1.r106.g61c01d1
 pkgrel=1
 pkgdesc="Emoji picker for Fcitx5 with a handwritten Hanzi input pad"
 arch=('x86_64')

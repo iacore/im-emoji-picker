@@ -1,15 +1,21 @@
 # Install the handwriting build of the emoji picker.
 #
-# 1. ggml is required at runtime and is in [extra]:
-sudo pacman -S ggml
+# 1. Install the package. It replaces the stock fcitx5-im-emoji-picker-git
+#    (pacman asks first); ~/.config/fcitx5, including the Super+E trigger, is
+#    not touched.
+sudo pacman -U /home/user/computing/extension/im-emoji-picker/packaging/fcitx5-im-emoji-picker-handwriting-git-1.1.1.r106.g61c01d1-1-x86_64.pkg.tar.zst
 
-# 2. Install the package. It conflicts with fcitx5-im-emoji-picker-git, so
-#    pacman will ask to remove that one first; your configuration in
-#    ~/.config/fcitx5 (including the Super+E trigger) is not touched.
-sudo pacman -U /home/user/computing/extension/im-emoji-picker/packaging/fcitx5-im-emoji-picker-handwriting-git-1.1.1.r103.g2ab0633-1-x86_64.pkg.tar.zst
+# 2. A running fcitx5 keeps the library it mapped at startup, which is the file
+#    the upgrade replaced. There are currently two instances: the
+#    dinit-supervised one (started before the install) and a stray one from
+#    'fcitx5 -r'. Kill both; dinit has restart = true and brings up a fresh one
+#    that loads the new library.
+pkill -x fcitx5
 
-# 3. Restart fcitx5 (dinit manages it on this machine, otherwise: fcitx5 -r -d)
-dinitctl restart fcitx5
+# 3. Verify the running instances use the new library: the output must show
+#    fcitx5imemojipicker-handwriting.so and libggml, and no "(deleted)".
+for p in $(pgrep -x fcitx5); do echo "pid $p"; ls -l /proc/$p/map_files/ | grep -iE 'imemojipicker|libggml' | sed 's/.*-> //' | sort -u; done
 
-# 4. Super+E opens the picker, Tab three times switches to the pad (the status
-#    bar shows a pen), then write one character with the mouse or stylus.
+# 4. Super+E opens the picker. Shift+Tab (or Tab three times) switches to the
+#    handwriting pad; the status bar then shows a pen. Write with the mouse or a
+#    stylus, then click a candidate or press 1-9 / arrows + Enter.
