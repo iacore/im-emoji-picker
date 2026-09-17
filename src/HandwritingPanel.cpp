@@ -5,6 +5,7 @@
 #include <QCoreApplication>
 #include <QHBoxLayout>
 #include <QMouseEvent>
+#include <QPushButton>
 #include <QStandardPaths>
 #include <QVBoxLayout>
 
@@ -12,7 +13,7 @@
 
 namespace {
 
-constexpr int kPadSize = 168;
+constexpr int kPadSize = 320;
 constexpr int kCandidateGlyphSize = 44;
 
 }  // namespace
@@ -47,11 +48,23 @@ HandwritingPanel::HandwritingPanel(const EmojiPickerSettings& settings, QWidget*
   _candidateRow->addStretch(1);
   layout->addLayout(_candidateRow);
 
-  _hint = new QLabel{this};
-  _hint->setAlignment(Qt::AlignHCenter);
-  _hint->setWordWrap(true);
-  layout->addWidget(_hint);
+  auto* bottomRow = new QHBoxLayout{};
+  bottomRow->setSpacing(8);
 
+  _clearButton = new QPushButton{tr("Clear"), this};
+  _clearButton->setFocusPolicy(Qt::NoFocus);
+  _clearButton->setToolTip(tr("Wipe the pad (or right click it, or press Ctrl+Backspace)"));
+  QObject::connect(_clearButton, &QPushButton::clicked, [this]() {
+    clear();
+  });
+  bottomRow->addWidget(_clearButton);
+
+  _hint = new QLabel{this};
+  _hint->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  _hint->setWordWrap(true);
+  bottomRow->addWidget(_hint, 1);
+
+  layout->addLayout(bottomRow);
   layout->addStretch(1);
 
   QObject::connect(_pad, &HandwritingPad::strokesChanged, [this]() {
@@ -196,6 +209,7 @@ void HandwritingPanel::commitCandidate(int index) {
 }
 
 void HandwritingPanel::setHint(const QString& text) {
+  // Stays visible even when empty: it holds the stretch that keeps the Clear
+  // button at its natural width.
   _hint->setText(text);
-  _hint->setVisible(!text.isEmpty());
 }

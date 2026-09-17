@@ -22,7 +22,7 @@ HandwritingPad::HandwritingPad(QWidget* parent) : QWidget(parent) {
   setAttribute(Qt::WA_ShowWithoutActivating);
   setCursor(Qt::CrossCursor);
   setMinimumSize(120, 120);
-  setToolTip(tr("Draw a character here"));
+  setToolTip(tr("Write one character here. Right click to wipe it."));
 }
 
 int HandwritingPad::penWidth() const {
@@ -71,6 +71,12 @@ void HandwritingPad::endStroke() {
 }
 
 void HandwritingPad::mousePressEvent(QMouseEvent* event) {
+  if (event->button() == Qt::RightButton) {
+    clear();
+    event->accept();
+    return;
+  }
+
   if (event->button() != Qt::LeftButton) {
     QWidget::mousePressEvent(event);
     return;

@@ -29,7 +29,7 @@ from render_strokes import STROKE_BOX, load_medians  # noqa: E402
 REPO = Path(__file__).resolve().parents[2]
 DISPLAY = ":97"
 SCREEN = "1280x1024x24"
-PAD_VIEW_HEIGHT = 280
+PAD_VIEW_HEIGHT = 420
 EMOJI_VIEW_HEIGHT = 190
 
 
@@ -80,6 +80,14 @@ def ink_rect(path):
     return int(columns.min()), int(rows.min()), int(columns.max()), int(rows.max())
 
 
+def ink_pixels(path, rect):
+    """Count strongly dark pixels inside the pad, i.e. actual ink."""
+    left, top, right, bottom = rect
+    gray = np.asarray(Image.open(path).convert("L"))
+    inner = gray[top + 2:bottom - 1, left + 2:right - 1]
+    return int((inner < 100).sum())
+
+
 def click(env, x, y):
     run(["xdotool", "mousemove", str(int(x)), str(int(y)), "click", "1"], env)
     time.sleep(0.35)
@@ -94,6 +102,23 @@ def click_indicator(env, window, target_height):
             if window_rect(env, window)[3] == target_height:
                 return dx, dy
     raise RuntimeError(f"no status bar indicator switched the window to {target_height}px")
+
+
+def click_clear_button(env, window, rect, out):
+    """Find the Clear button by probing the lower left of the panel.
+
+    Candidate labels sit in the middle of the row above, so the probe stays left
+    of them and the caller rejects any attempt that commits something.
+    """
+    x, y, _width, _height = window_rect(env, window)
+    del y
+    for offset_y in range(44, 104, 8):
+        for offset_x in (24, 34, 44, 54):
+            click(env, x + offset_x, rect[3] + offset_y)
+            screenshot(env, out / "probe.png")
+            if ink_pixels(out / "probe.png", rect) == 0:
+                return offset_x, offset_y
+    return None
 
 
 def draw(env, medians, rect, inset_ratio=0.08):
@@ -176,14 +201,17 @@ def main() -> int:
 
         window = wait_for_window(env)
 
-        # 1. The pad is what the picker opens with - no keystroke involved.
-        if not wait_for_height(env, window, PAD_VIEW_HEIGHT):
-            print(f"FAIL: picker opened at {window_rect(env, window)} instead of the pad view")
+        # 1. The picker opens on the emoji view again.
+        if not wait_for_height(env, window, EMOJI_VIEW_HEIGHT):
+            print(f"FAIL: picker opened at {window_rect(env, window)} instead of the emoji view")
             return 1
         print(f"window {window}: {window_rect(env, window)}")
-        screenshot(env, args.out / "1-opened-with-pad.png")
-        rect = ink_rect(args.out / "1-opened-with-pad.png")
-        print(f"PASS: pad visible on open, ink area {rect} ({rect[2] - rect[0]}x{rect[3] - rect[1]})")
+
+        # 2. Clicking the pen indicator switches to the pad.
+        pen_dx = click_indicator(env, window, PAD_VIEW_HEIGHT)
+        screenshot(env, args.out / "1-pad-view.png")
+        rect = ink_rect(args.out / "1-pad-view.png")
+        print(f"PASS: clicking the pen indicator at -{pen_dx[0]}px,-{pen_dx[1]}px opened the pad, ink area {rect[2] - rect[0]}x{rect[3] - rect[1]}")
 
         # 2. Draw with the mouse and commit the top candidate with a digit.
         draw(env, medians, rect)
@@ -220,14 +248,45 @@ def main() -> int:
             return 1
         print(f"PASS: arrow-down + Enter committed the second candidate {picked[0]}")
 
-        # 4. Status bar indicators switch views when clicked.
-        emoji_dx = click_indicator(env, window, EMOJI_VIEW_HEIGHT)
-        screenshot(env, args.out / "3-clicked-emoji-indicator.png")
-        print(f"PASS: clicking a status indicator at -{emoji_dx[0]}px,-{emoji_dx[1]}px left the pad view")
+        # 4. Right click wipes the pad.
+        draw(env, medians, rect)
+        time.sleep(0.5)
+        if ink_pixels(args.out / "2-after-strokes.png", rect) == 0:
+            print("FAIL: the drawn strokes left no ink to test clearing with")
+            return 1
+        x, y, width, height = window_rect(env, window)
+        run(["xdotool", "mousemove", str((rect[0] + rect[2]) // 2), str((rect[1] + rect[3]) // 2), "click", "3"], env)
+        time.sleep(0.4)
+        screenshot(env, args.out / "5-after-right-click.png")
+        if ink_pixels(args.out / "5-after-right-click.png", rect) != 0:
+            print("FAIL: right clicking the pad did not wipe it")
+            return 1
+        print("PASS: right clicking the pad wiped it")
 
-        pen_dx = click_indicator(env, window, PAD_VIEW_HEIGHT)
-        screenshot(env, args.out / "4-clicked-pen-indicator.png")
-        print(f"PASS: clicking the pen indicator at -{pen_dx[0]}px,-{pen_dx[1]}px returned to the pad")
+        # 5. The Clear button wipes it too, and must not commit anything.
+        drain(app, collected)
+        draw(env, medians, rect)
+        time.sleep(0.5)
+        button = click_clear_button(env, window, rect, args.out)
+        if button is None:
+            print("FAIL: no Clear button found in the lower left of the panel")
+            return 1
+        screenshot(env, args.out / "6-after-clear-button.png")
+        leftovers = drain(app, collected)
+        if ink_pixels(args.out / "6-after-clear-button.png", rect) != 0:
+            for line in leftovers:
+                print(f"  harness said: {line}")
+            print("FAIL: the Clear button did not wipe the pad")
+            return 1
+        if commits_in(leftovers):
+            print("FAIL: the click landed on a candidate instead of the Clear button")
+            return 1
+        print(f"PASS: the Clear button at +{button[0]}px,+{button[1]}px (window relative) wiped the pad without committing")
+
+        # 6. Status bar indicators switch back.
+        emoji_dx = click_indicator(env, window, EMOJI_VIEW_HEIGHT)
+        screenshot(env, args.out / "7-emoji-view.png")
+        print(f"PASS: clicking a status indicator at -{emoji_dx[0]}px,-{emoji_dx[1]}px left the pad view")
         return 0
     finally:
         if app is not None:

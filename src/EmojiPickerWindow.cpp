@@ -557,10 +557,7 @@ void EmojiPickerWindow::setViewMode(ViewMode mode) {
   _handwritingModeLabel->setHighlighted(_mode == ViewMode::HANDWRITING);
 
   applyMode();
-
-  if (_mode != ViewMode::HANDWRITING) {
-    updateEmojiList();
-  }
+  updateEmojiList();
 }
 
 void EmojiPickerWindow::applyMode() {
@@ -570,7 +567,9 @@ void EmojiPickerWindow::applyMode() {
   _emojiListScroll->setVisible(!handwriting);
   _handwritingPanel->setVisible(handwriting);
 
-  setFixedSize(340, handwriting ? 280 : 190);
+  // The pad gets a window of its own size, comfortably larger than the emoji
+  // grid: a bigger writing area measurably helps when drawing with a mouse.
+  setFixedSize(handwriting ? QSize{380, 420} : QSize{340, 190});
 
   if (handwriting) {
     _handwritingPanel->activate();
@@ -602,10 +601,7 @@ void EmojiPickerWindow::enable(bool resetPosition) {
   _emojiMRU = EmojiPickerCache{}.emojiMRU();
 
   applyMode();
-
-  if (_mode != ViewMode::HANDWRITING) {
-    updateEmojiList();
-  }
+  updateEmojiList();
 }
 
 void EmojiPickerWindow::changeEvent(QEvent* event) {
@@ -623,14 +619,14 @@ void EmojiPickerWindow::disable() {
 
   resetInputMethodEngine();
 
-  _mode = ViewMode::HANDWRITING;
+  _mode = ViewMode::MRU;
   _searchEdit->setText("");
   _searchCompletion->setText("");
 
-  _mruModeLabel->setHighlighted(false);
+  _mruModeLabel->setHighlighted(true);
   _listModeLabel->setHighlighted(false);
   _kaomojiModeLabel->setHighlighted(false);
-  _handwritingModeLabel->setHighlighted(true);
+  _handwritingModeLabel->setHighlighted(false);
   _handwritingPanel->clear();
   applyMode();
 

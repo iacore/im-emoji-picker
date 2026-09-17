@@ -186,8 +186,7 @@ private:
     HANDWRITING,
   };
 
-  // The pad is what this build is for, so it is the view the picker opens in.
-  ViewMode _mode = ViewMode::HANDWRITING;
+  ViewMode _mode = ViewMode::MRU;
 
   void setViewMode(ViewMode mode);
 

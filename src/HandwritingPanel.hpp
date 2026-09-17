@@ -12,6 +12,7 @@
 
 class EmojiLabel;
 class QHBoxLayout;
+class QPushButton;
 
 // The handwriting view: a square ink pad, a row of recognized characters, and a
 // status line. Recognition runs on the pad's own thread of control (the GUI
@@ -49,6 +50,7 @@ private:
   const EmojiPickerSettings& _settings;
   HandwritingPad* _pad = nullptr;
   QHBoxLayout* _candidateRow = nullptr;
+  QPushButton* _clearButton = nullptr;
   QLabel* _hint = nullptr;
   std::vector<EmojiLabel*> _candidateLabels;
   std::vector<HccrCandidate> _candidates;
