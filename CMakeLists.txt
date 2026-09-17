@@ -63,6 +63,16 @@ include_directories(${PROJECT_SOURCE_DIR}/src)
 
 option(ONLY_FCITX5 "Build only with Fcitx 5 Support" Off)
 option(ONLY_IBUS "Build only with IBus Support" Off)
+option(ENABLE_HANDWRITING "Handwriting pad for Hanzi input (requires ggml)" On)
+
+set(SRC_HCCR "")
+set(HCCR_LIBRARIES "")
+if (ENABLE_HANDWRITING)
+  find_package(ggml REQUIRED)
+  set(SRC_HCCR src/hccr/HccrRecognizer.cpp)
+  set(HCCR_LIBRARIES ggml::ggml)
+  add_definitions(-DHAVE_HANDWRITING)
+endif ()
 
 set(SRC_FILES_COMMON
   src/logging.cpp
@@ -73,6 +83,7 @@ set(SRC_FILES_COMMON
   src/EmojiPickerWindow.cpp
   src/EmojiPickerWindow.qrc
   src/EmojiLabel.cpp
+  ${SRC_HCCR}
 )
 
 set(SKIP_FCITX5 FALSE)
@@ -112,6 +123,7 @@ if (NOT SKIP_IBUS)
     PkgConfig::IBus
     PkgConfig::GLib
     PkgConfig::GObject
+    ${HCCR_LIBRARIES}
   )
 
   install(TARGETS ibusimemojipicker RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/ibus)
@@ -149,6 +161,7 @@ if (NOT SKIP_FCITX5)
     Qt5::Gui
     Qt5::Widgets
     Fcitx5::Core
+    ${HCCR_LIBRARIES}
   )
 
   install(TARGETS fcitx5imemojipicker LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib64/fcitx5)
@@ -158,3 +171,15 @@ if (NOT SKIP_FCITX5)
 endif ()
 
 include(CPack)
+
+if (ENABLE_HANDWRITING)
+  # Numeric harness: runs the ggml port on pre-normalized bitmaps and dumps raw
+  # logits so they can be compared against the numpy reference.
+  add_executable(hccr-verify tools/hccr/verify_ggml.cpp ${SRC_HCCR})
+  set_target_properties(hccr-verify PROPERTIES
+    CXX_STANDARD ${CXX_STANDARD_OVERRIDE}
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+  )
+  target_link_libraries(hccr-verify Qt5::Core Qt5::Gui ggml::ggml)
+endif ()
