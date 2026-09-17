@@ -34,6 +34,7 @@ def main() -> None:
     from gguf import GGMLQuantizationType as Q, GGUFWriter
 
     model = MobileNetV2HCCR(args.checkpoint, args.charset)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
 
     writer = GGUFWriter(args.out, arch=ARCH)
     writer.add_name(NAME)

@@ -1,0 +1,23 @@
+# pack-refs with: peeled fully-peeled sorted 
+f0b2bad2e1a4e3fae62fbb4957d04fb9e2713619 refs/heads/handwriting-hanzi
+556a36958ee4295121ec62c1320d0105c12f7071 refs/heads/master
+556a36958ee4295121ec62c1320d0105c12f7071 refs/remotes/origin/HEAD
+693a166a7ca75891c9ed0140c325f1af1d2c6828 refs/remotes/origin/feature/cpp20
+a4e4ae76b75c9ebced1303c5670941fe2e128632 refs/remotes/origin/feature/fix-fcitx5-sigterm
+48f2cffc6611856bddadbe997c4161d2ae603b05 refs/remotes/origin/feature/system-emoji-font-override
+556a36958ee4295121ec62c1320d0105c12f7071 refs/remotes/origin/master
+08145d583e2099c25b0a52749c422c8253c6eb5a refs/tags/nightly-build
+f283e32227983a286288afe91d1229431287fe56 refs/tags/v0.1.0
+^a2dd8f16bb1d561cab010b64a47d8bf761cd622f
+b754500b2ec9b9221f92ab90882a81208a51ee74 refs/tags/v0.2.0
+^5a6626fd47c7466719e98fdad37a0e0f83414120
+320e6bd586b581199f5d8222499902638bc03bf1 refs/tags/v0.3.0
+^b56ec6a6079fb793991a00ce6a350d26ad190a5c
+74a89a4f6b7e7936cf758d2bf6c9f7e2725ebfd0 refs/tags/v1.0.0
+^a9c4afa713e5667634bfa47ca27c78d2500c8658
+96f8c30a53b877aa11ca7bea06bf8f789aab2f59 refs/tags/v1.0.1
+^c8511b6154be0ebedd3e339e7c2c17bf13ae2ba5
+a77e24ffafc314a3ac999da8f89fa134a6ed15a4 refs/tags/v1.1.0
+^d7f415c51b612622f3d896485082f515ce612656
+5f05012aeb353258a6a4d3696062d0f9ed8eef59 refs/tags/v1.1.1
+^2970bbbff3b7efdf9bc524a64829df986b30c9b8
