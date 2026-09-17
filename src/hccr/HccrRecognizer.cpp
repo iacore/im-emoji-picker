@@ -2,7 +2,6 @@
 
 #include <ggml-alloc.h>
 #include <ggml-backend.h>
-#include <ggml-cpu.h>
 #include <ggml.h>
 #include <gguf.h>
 
@@ -11,7 +10,6 @@
 #include <cstring>
 #include <numeric>
 #include <stdexcept>
-#include <thread>
 #include <unordered_map>
 
 namespace {
@@ -152,7 +150,6 @@ struct HccrRecognizer::Impl {
   ggml_tensor* output = nullptr;
 
   double lastMilliseconds = 0.0;
-  int threads = 4;
 
   ~Impl() {
     if (graphBuffer) {
@@ -210,14 +207,16 @@ std::unique_ptr<HccrRecognizer> HccrRecognizer::load(const std::string& modelPat
   std::unique_ptr<HccrRecognizer> recognizer{new HccrRecognizer()};
   Impl& impl = *recognizer->_impl;
 
+  // Distributions ship ggml with its backends as separate shared objects that
+  // are loaded on demand, so register them before asking for the CPU device.
+  // With a static ggml this simply finds nothing new. The CPU backend keeps its
+  // own thread count (GGML_DEFAULT_N_THREADS); tuning it would mean reaching
+  // through the backend proc-address API, which is not worth a knob here.
+  ggml_backend_load_all();
+
   impl.backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
   if (!impl.backend) {
     return fail("could not initialize the ggml CPU backend");
-  }
-  const unsigned hardware = std::thread::hardware_concurrency();
-  impl.threads = static_cast<int>(std::max(1u, std::min(4u, hardware ? hardware : 1u)));
-  if (ggml_backend_is_cpu(impl.backend)) {
-    ggml_backend_cpu_set_n_threads(impl.backend, impl.threads);
   }
 
   // The meta context holds the tensors as they are stored in the file, pointing

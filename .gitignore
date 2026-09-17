@@ -2,3 +2,6 @@ build*/
 .cache/
 models/
 *.gguf
+packaging/src/
+packaging/pkg/
+packaging/*.pkg.tar.*
