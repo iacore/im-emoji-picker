@@ -5,3 +5,4 @@ models/
 packaging/src/
 packaging/pkg/
 packaging/*.pkg.tar.*
+packaging/im-emoji-picker/
