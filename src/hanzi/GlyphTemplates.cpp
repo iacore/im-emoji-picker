@@ -165,6 +165,11 @@ QString firstHanziFamily() {
 
 // ------------------------------------------------------------------- masks
 
+// The masks are counted once per shortlisted template, which is half a million
+// popcounts per rank. Without a target that has the instruction GCC calls the
+// libgcc routine for each word, so the narrowest possible clone - POPCNT alone,
+// available since 2008 - is worth carrying next to the baseline version.
+__attribute__((target_clones("default", "popcnt")))
 int countBits(const uint8_t* mask) {
   int total = 0;
   for (int word = 0; word < kMaskBytes / 8; ++word) {
@@ -175,6 +180,7 @@ int countBits(const uint8_t* mask) {
   return total;
 }
 
+__attribute__((target_clones("default", "popcnt")))
 int countBitsAnd(const uint8_t* left, const uint8_t* right) {
   int total = 0;
   for (int word = 0; word < kMaskBytes / 8; ++word) {
