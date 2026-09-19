@@ -13,6 +13,7 @@ arch=('x86_64')
 url="https://github.com/GaZaTu/im-emoji-picker"
 license=('MIT' 'Apache')
 depends=('fcitx5' 'qt5-base' 'icu' 'hicolor-icon-theme' 'ggml')
+optdepends=('noto-fonts-cjk: rare characters need the charset-wide templates, and those are rendered from the system CJK fonts')
 makedepends=('cmake' 'ninja' 'git' 'python' 'python-numpy')
 provides=('fcitx5-im-emoji-picker' 'fcitx5-im-emoji-picker-git')
 conflicts=('fcitx5-im-emoji-picker' 'fcitx5-im-emoji-picker-git')
@@ -28,12 +29,16 @@ source=(
   "im-emoji-picker::git+file://${_repodir}#branch=handwriting-hanzi"
   "best.pt::https://huggingface.co/Ismantic/Handwritten/resolve/main/best.pt"
   "charset.json::https://huggingface.co/Ismantic/Handwritten/resolve/main/ncnn/charset.json"
+  "graphics.txt::https://raw.githubusercontent.com/skishore/makemeahanzi/master/graphics.txt"
+  "ids.txt::https://raw.githubusercontent.com/cjkvi/cjkvi-ids/master/ids.txt"
   "llama.cpp-${_llama_commit}.tar.gz::https://github.com/ggml-org/llama.cpp/archive/${_llama_commit}.tar.gz"
 )
 sha256sums=(
   'SKIP'
   '151f32b03c49dbed77f3b8076035d28ce050d70a1a102e12581274a44cb10460'
   '31f5700027c8692122cec5281d12c6382506b36d56075331cd73718f624d4ed2'
+  'a28c478b5178e98f67f510b2d52fde08a69dc664654ef43498253b9b764d46ee'
+  'bfc70a8c09f9f5616ebf0543bd6681e67314e9f7ae2307e5ae8c6f15bdc5c6a6'
   '1eea355e60e4898c7121764170fc23dd5a6735be2dc84e9cd45eab7ff4760775'
 )
 
@@ -53,6 +58,15 @@ build() {
     python tools/hccr/convert_to_gguf.py \
       --checkpoint "$srcdir/best.pt" \
       --charset "$srcdir/charset.json"
+
+  # The rare-character routes read the Make Me a Hanzi medians and the CJKVI
+  # ideographic description table; both are compacted into the two files CMake
+  # installs next to the model. Writing into models/ makes the install rule pick
+  # them up.
+  python tools/hanzi/convert_data.py \
+    --graphics "$srcdir/graphics.txt" \
+    --ids "$srcdir/ids.txt" \
+    --out models/hanzi
 
   # Release rather than None: this codebase indexes key event text without a
   # bounds check, so Qt assertions have to stay compiled out.

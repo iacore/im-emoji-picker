@@ -63,6 +63,11 @@ public:
 
   std::string handwritingModelPath() const;
   void handwritingModelPath(const std::string& handwritingModelPath);
+
+  // Directory holding hanzi-dictionary.bin and hanzi-ids.bin, the data the
+  // rare-character routes match against. Empty means the installed location.
+  std::string handwritingDataPath() const;
+  void handwritingDataPath(const std::string& handwritingDataPath);
 };
 
 class EmojiPickerCache : public QSettings {

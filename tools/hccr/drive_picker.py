@@ -6,6 +6,14 @@ actual mouse events, commits a candidate with a keystroke, and switches views
 by clicking the status bar indicators. Screenshots are kept for inspection.
 
   python3 drive_picker.py --char 休
+  python3 drive_picker.py --strokes-json drawing.json --expect 谞
+
+With --strokes-json the drawing comes from a pad-coordinate stroke file (the
+shape tools/hanzi's make_test_strokes.py writes) instead of a character's
+medians, and the run is the rare-character check: the drawing is committed
+through every slot of the candidate row in turn, and --expect names the
+character that has to be among them. That is the path only the charset-wide and
+component routes can produce.
 """
 
 from __future__ import annotations
@@ -121,20 +129,9 @@ def click_clear_button(env, window, rect, out):
     return None
 
 
-def draw(env, medians, rect, inset_ratio=0.08):
-    left, top, right, bottom = rect
-    width = right - left
-    height = bottom - top
-    inset_x = width * inset_ratio
-    inset_y = height * inset_ratio
-
-    for stroke in medians:
-        points = []
-        for x, y in stroke:
-            points.append((
-                left + inset_x + (x / STROKE_BOX) * (width - 2 * inset_x),
-                top + inset_y + ((STROKE_BOX - y) / STROKE_BOX) * (height - 2 * inset_y),
-            ))
+def drive(env, strokes):
+    """Draw polylines with real mouse events, one press/move/release per stroke."""
+    for points in strokes:
         if not points:
             continue
 
@@ -144,6 +141,44 @@ def draw(env, medians, rect, inset_ratio=0.08):
             time.sleep(0.004)
         run(["xdotool", "mouseup", "1"], env)
         time.sleep(0.05)
+
+
+def draw(env, medians, rect, inset_ratio=0.08):
+    left, top, right, bottom = rect
+    width = right - left
+    height = bottom - top
+    inset_x = width * inset_ratio
+    inset_y = height * inset_ratio
+
+    strokes = []
+    for stroke in medians:
+        strokes.append([
+            (
+                left + inset_x + (x / STROKE_BOX) * (width - 2 * inset_x),
+                top + inset_y + ((STROKE_BOX - y) / STROKE_BOX) * (height - 2 * inset_y),
+            )
+            for x, y in stroke
+        ])
+    drive(env, strokes)
+
+
+def draw_strokes_json(env, strokes, rect, inset_ratio=0.08):
+    """Draw a reference stroke JSON (pad coordinates, y down): the shape the
+    hanzi-handwriting make_test_strokes.py writes, drawn to fill the pad."""
+    left, top, right, bottom = rect
+    width = right - left
+    height = bottom - top
+    inset_x = width * inset_ratio
+    inset_y = height * inset_ratio
+
+    xs = [point[0] for stroke in strokes for point in stroke]
+    ys = [point[1] for stroke in strokes for point in stroke]
+    span = max(max(xs) - min(xs), max(ys) - min(ys), 1e-6)
+    scale = min(width - 2 * inset_x, height - 2 * inset_y) / span
+    offset_x = left + width / 2 - (min(xs) + max(xs)) / 2 * scale
+    offset_y = top + height / 2 - (min(ys) + max(ys)) / 2 * scale
+
+    drive(env, [[(offset_x + x * scale, offset_y + y * scale) for x, y in stroke] for stroke in strokes])
 
 
 def send(app, line):
@@ -179,6 +214,10 @@ def commits_in(lines):
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--char", default="休")
+    parser.add_argument("--strokes-json", type=Path, help="draw this pad-coordinate stroke JSON instead of --char's medians")
+    parser.add_argument("--scan", type=int, default=9, help="with --strokes-json: commit candidates 1..N and report them")
+    parser.add_argument("--expect", default="", help="with --scan: the character that must be among them")
+    parser.add_argument("--settle", type=float, default=3.0, help="seconds to wait for the heavy routes; a cold template cache needs ~30")
     parser.add_argument("--model", type=Path, default=REPO / "models/hccr/hccr-mobilenetv2.gguf")
     parser.add_argument("--picker", type=Path, default=REPO / "build-usr/picker-gui")
     parser.add_argument("--out", type=Path, default=REPO / "build/picker-test")
@@ -186,9 +225,17 @@ def main() -> int:
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
-    medians = load_medians(args.char, args.data_dir)
-    if medians is None:
-        raise SystemExit(f"no stroke data for {args.char}")
+    medians = None
+    rare_strokes = None
+    if args.strokes_json is not None:
+        import json
+
+        payload = json.loads(args.strokes_json.read_text())
+        rare_strokes = [[(float(point[0]), float(point[1])) for point in stroke] for stroke in payload["strokes"]]
+    else:
+        medians = load_medians(args.char, args.data_dir)
+        if medians is None:
+            raise SystemExit(f"no stroke data for {args.char}")
 
     env = {**os.environ, "DISPLAY": DISPLAY, "QT_QPA_PLATFORM": "xcb", "IM_EMOJI_PICKER_HCCR_MODEL": str(args.model)}
 
@@ -213,7 +260,44 @@ def main() -> int:
         rect = ink_rect(args.out / "1-pad-view.png")
         print(f"PASS: clicking the pen indicator at -{pen_dx[0]}px,-{pen_dx[1]}px opened the pad, ink area {rect[2] - rect[0]}x{rect[3] - rect[1]}")
 
-        # 2. Draw with the mouse and commit the top candidate with a digit.
+        # 2. A drawing that needs the charset-wide and component routes: commit
+        #    every slot in turn, so a candidate only those routes can produce is
+        #    still found.
+        if rare_strokes is not None:
+            # A cold template cache is built on the first drawing, which takes
+            # minutes on some machines; get that out of the way so the scan below
+            # waits the normal moment per slot.
+            if args.settle > 6:
+                draw_strokes_json(env, rare_strokes, rect)
+                time.sleep(args.settle)
+                screenshot(env, args.out / "2-rare-warmed.png")
+                drain(app, collected, timeout=0)
+
+            committed = []
+            for slot in range(max(args.scan, 1)):
+                drain(app, collected, timeout=0)
+                draw_strokes_json(env, rare_strokes, rect)
+                # The heavy routes answer a moment after the last stroke, and on
+                # a cold cache they build the templates first.
+                time.sleep(1.0)
+                if slot == 0:
+                    screenshot(env, args.out / "2-rare-early.png")
+                time.sleep(min(args.settle, 4.0))
+                if slot == 0:
+                    screenshot(env, args.out / "3-rare-settled.png")
+                send(app, f"key {slot + 1}")
+                time.sleep(0.4)
+                picked = commits_in(drain(app, collected))
+                committed.append(picked[0] if picked else "")
+            print(f"candidates 1..{len(committed)}: {' '.join(committed)}")
+            if args.expect:
+                if args.expect not in committed:
+                    print(f"FAIL: {args.expect} is not reachable from the pad")
+                    return 1
+                print(f"PASS: drew {args.expect}, the pad offered it at slot {committed.index(args.expect) + 1}")
+            return 0
+
+        # 3. Draw with the mouse and commit the top candidate with a digit.
         draw(env, medians, rect)
         time.sleep(0.6)
         screenshot(env, args.out / "2-after-strokes.png")
@@ -232,7 +316,7 @@ def main() -> int:
             return 1
         print(f"PASS: drew {args.char} with the mouse, pad committed {drawn[0]}")
 
-        # 3. Same again, committed through arrow selection and Enter.
+        # 4. Same again, committed through arrow selection and Enter.
         draw(env, medians, rect)
         time.sleep(0.6)
         send(app, "key down")
@@ -248,7 +332,7 @@ def main() -> int:
             return 1
         print(f"PASS: arrow-down + Enter committed the second candidate {picked[0]}")
 
-        # 4. Right click wipes the pad.
+        # 5. Right click wipes the pad.
         draw(env, medians, rect)
         time.sleep(0.5)
         if ink_pixels(args.out / "2-after-strokes.png", rect) == 0:
@@ -263,7 +347,7 @@ def main() -> int:
             return 1
         print("PASS: right clicking the pad wiped it")
 
-        # 5. The Clear button wipes it too, and must not commit anything.
+        # 6. The Clear button wipes it too, and must not commit anything.
         drain(app, collected)
         draw(env, medians, rect)
         time.sleep(0.5)
@@ -283,7 +367,7 @@ def main() -> int:
             return 1
         print(f"PASS: the Clear button at +{button[0]}px,+{button[1]}px (window relative) wiped the pad without committing")
 
-        # 6. Status bar indicators switch back.
+        # 7. Status bar indicators switch back.
         emoji_dx = click_indicator(env, window, EMOJI_VIEW_HEIGHT)
         screenshot(env, args.out / "7-emoji-view.png")
         print(f"PASS: clicking a status indicator at -{emoji_dx[0]}px,-{emoji_dx[1]}px left the pad view")

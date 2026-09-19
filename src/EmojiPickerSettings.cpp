@@ -52,6 +52,7 @@ void EmojiPickerSettings::writeDefaultsToDisk() {
   s.saveKaomojiInMRU(s.saveKaomojiInMRU());
   s.customHotKeys(s.customHotKeys());
   s.handwritingModelPath(s.handwritingModelPath());
+  s.handwritingDataPath(s.handwritingDataPath());
 }
 
 EmojiPickerSettings::EmojiPickerSettings() : QSettings(QSettings::IniFormat, QSettings::UserScope, QCoreApplication::organizationName(), QCoreApplication::applicationName(), nullptr) {
@@ -254,6 +255,14 @@ std::string EmojiPickerSettings::handwritingModelPath() const {
 
 void EmojiPickerSettings::handwritingModelPath(const std::string& handwritingModelPath) {
   setValue("handwritingModelPath", QString::fromStdString(handwritingModelPath));
+}
+
+std::string EmojiPickerSettings::handwritingDataPath() const {
+  return value("handwritingDataPath", "").toString().toStdString();
+}
+
+void EmojiPickerSettings::handwritingDataPath(const std::string& handwritingDataPath) {
+  setValue("handwritingDataPath", QString::fromStdString(handwritingDataPath));
 }
 
 EmojiPickerCache::EmojiPickerCache() : QSettings(path(), QSettings::IniFormat) {

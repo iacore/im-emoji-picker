@@ -19,6 +19,11 @@ public:
   bool isEmpty() const;
   int strokeCount() const;
 
+  // The trajectories as drawn, in pad pixels with y growing downwards. The
+  // recognizers that read the pen path itself (rather than a rendered bitmap)
+  // need them; the bitmap loses the stroke order.
+  const QVector<QVector<QPointF>>& strokes() const;
+
 public Q_SLOTS:
   void clear();
   void undoStroke();

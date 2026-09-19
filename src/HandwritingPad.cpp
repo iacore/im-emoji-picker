@@ -37,6 +37,10 @@ int HandwritingPad::strokeCount() const {
   return _strokes.size();
 }
 
+const QVector<QVector<QPointF>>& HandwritingPad::strokes() const {
+  return _strokes;
+}
+
 void HandwritingPad::clear() {
   if (_strokes.isEmpty()) {
     return;

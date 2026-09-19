@@ -1,12 +1,15 @@
 #include "HandwritingPanel.hpp"
 
 #include "EmojiLabel.hpp"
+#include "HandwritingWorker.hpp"
 
 #include <QCoreApplication>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -16,7 +19,49 @@ namespace {
 constexpr int kPadSize = 320;
 constexpr int kCandidateGlyphSize = 44;
 
-}  // namespace
+// Long enough that a stroke in progress does not start a pass, short enough
+// that the row is filled in while the user is still looking at it.
+constexpr int kDetailedDelayMilliseconds = 350;
+
+hanzi::Strokes toHanziStrokes(const QVector<QVector<QPointF>>& strokes) {
+  hanzi::Strokes converted;
+  converted.reserve(strokes.size());
+  for (const QVector<QPointF>& stroke : strokes) {
+    hanzi::Stroke points;
+    points.reserve(stroke.size());
+    for (const QPointF& point : stroke) {
+      points.push_back(hanzi::Point{point.x(), point.y()});
+    }
+    converted.push_back(std::move(points));
+  }
+  return converted;
+}
+
+// Where the rare-character data lives: the setting, then the environment, then
+// the installed location - the same order the classifier's model file uses.
+QString dataDirectory(const EmojiPickerSettings& settings) {
+  const QString configured = QString::fromStdString(settings.handwritingDataPath());
+  if (!configured.isEmpty()) {
+    return configured;
+  }
+  const QByteArray fromEnvironment = qgetenv("IM_EMOJI_PICKER_HANZI_DATA");
+  if (!fromEnvironment.isEmpty()) {
+    return QString::fromLocal8Bit(fromEnvironment);
+  }
+  return QStandardPaths::locate(QStandardPaths::GenericDataLocation, "im-emoji-picker/hanzi", QStandardPaths::LocateDirectory);
+}
+
+// The templates are a cache, not data: they are rebuilt from the system's fonts
+// and weigh a few hundred megabytes, so they belong where caches belong.
+QString templateCacheDirectory() {
+  const QByteArray fromEnvironment = qgetenv("IM_EMOJI_PICKER_HANZI_CACHE");
+  if (!fromEnvironment.isEmpty()) {
+    return QString::fromLocal8Bit(fromEnvironment);
+  }
+  return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/hanzi-templates";
+}
+
+} // namespace
 
 HandwritingPanel::HandwritingPanel(const EmojiPickerSettings& settings, QWidget* parent) : QWidget(parent), _settings{settings} {
   setFocusPolicy(Qt::NoFocus);
@@ -67,6 +112,15 @@ HandwritingPanel::HandwritingPanel(const EmojiPickerSettings& settings, QWidget*
   layout->addLayout(bottomRow);
   layout->addStretch(1);
 
+  // The heavy routes are asked for once the drawing stops changing, so a pass
+  // never starts on a character that is still being written.
+  _detailedTimer = new QTimer{this};
+  _detailedTimer->setSingleShot(true);
+  _detailedTimer->setInterval(kDetailedDelayMilliseconds);
+  QObject::connect(_detailedTimer, &QTimer::timeout, [this]() {
+    requestDetailed();
+  });
+
   QObject::connect(_pad, &HandwritingPad::strokesChanged, [this]() {
     recognize();
   });
@@ -74,11 +128,13 @@ HandwritingPanel::HandwritingPanel(const EmojiPickerSettings& settings, QWidget*
   setHint(tr("Write a character in the box"));
 }
 
+HandwritingPanel::~HandwritingPanel() = default;
+
 HccrRecognizer* HandwritingPanel::recognizer() {
-  if (_recognizer || _loadAttempted) {
+  if (_recognizer || _modelLoadAttempted) {
     return _recognizer.get();
   }
-  _loadAttempted = true;
+  _modelLoadAttempted = true;
 
   QString path = QString::fromStdString(_settings.handwritingModelPath());
   if (path.isEmpty()) {
@@ -103,9 +159,36 @@ HccrRecognizer* HandwritingPanel::recognizer() {
   return _recognizer.get();
 }
 
+hanzi::HanziRecognizer* HandwritingPanel::hanzi() {
+  if (_hanzi || _hanziLoadAttempted) {
+    return _hanzi.get();
+  }
+  _hanziLoadAttempted = true;
+
+  const QString directory = dataDirectory(_settings);
+  if (directory.isEmpty()) {
+    _hanziError = tr("Rare-character data not found. Install hanzi-dictionary.bin and hanzi-ids.bin, or set handwritingDataPath.");
+    return nullptr;
+  }
+
+  hanzi::HanziRecognizer::Paths paths;
+  paths.dictionary = directory + "/hanzi-dictionary.bin";
+  paths.ids = directory + "/hanzi-ids.bin";
+  paths.templateCache = templateCacheDirectory();
+
+  QString error;
+  std::unique_ptr<hanzi::HanziRecognizer> loaded = hanzi::HanziRecognizer::create(paths, &error);
+  if (!loaded) {
+    _hanziError = error;
+    return nullptr;
+  }
+  _hanzi = std::move(loaded);
+  return _hanzi.get();
+}
+
 void HandwritingPanel::activate() {
-  if (recognizer() == nullptr) {
-    setHint(_modelError);
+  if (recognizer() == nullptr && hanzi() == nullptr) {
+    setHint(_modelError.isEmpty() ? _hanziError : _modelError);
     return;
   }
   if (_pad->isEmpty()) {
@@ -116,7 +199,12 @@ void HandwritingPanel::activate() {
 void HandwritingPanel::clear() {
   const bool hadContent = !_candidates.empty() || !_pad->isEmpty();
 
+  // Drop whatever is in flight: it belongs to the drawing being wiped.
+  ++_generation;
+  _detailedTimer->stop();
   _candidates.clear();
+  _modelCandidates.clear();
+  _sources.clear();
   refreshCandidates();
   _pad->clear();
 
@@ -138,40 +226,142 @@ bool HandwritingPanel::hasCandidates() const {
 }
 
 void HandwritingPanel::recognize() {
+  ++_generation;
+
   if (_pad->isEmpty()) {
     _candidates.clear();
+    _modelCandidates.clear();
+    _sources.clear();
     refreshCandidates();
     activate();
     return;
   }
 
-  HccrRecognizer* model = recognizer();
-  if (model == nullptr) {
-    _candidates.clear();
-    refreshCandidates();
-    setHint(_modelError);
-    return;
+  _selected = 0;
+  // The detailed answer belonged to the previous drawing; the quick pass puts
+  // the trajectory route back in the row for this one.
+  _sources.clear();
+  _detailedTimer->stop();
+
+  if (HccrRecognizer* model = recognizer()) {
+    _modelCandidates = model->recognize(_pad->toBitmap(), kCandidateCount);
+  } else {
+    _modelCandidates.clear();
   }
 
-  _selected = 0;
-  _candidates = model->recognize(_pad->toBitmap(), kCandidateCount);
-  refreshCandidates();
+  if (hanzi::HanziRecognizer* matcher = hanzi()) {
+    _sources = matcher->rankStrokes(toHanziStrokes(_pad->strokes()), kCandidateCount, hanzi::HanziRecognizer::Depth::Quick);
+  }
+
+  rebuildRow();
 
   if (_candidates.empty()) {
-    setHint(tr("Nothing recognized"));
+    setHint(_modelError.isEmpty() ? _hanziError : _modelError);
   } else {
     setHint(QString{});
   }
+
+  if (_hanzi) {
+    _detailedTimer->start();
+  }
+}
+
+void HandwritingPanel::requestDetailed() {
+  if (!_hanzi || _pad->isEmpty()) {
+    return;
+  }
+
+  if (!_worker) {
+    _worker = std::make_unique<HandwritingWorker>(
+        _hanzi, kCandidateCount,
+        [this](quint64 generation, std::vector<hanzi::HanziSource> sources) {
+          // Off the worker thread: hand the answer to the GUI thread, which is
+          // also the only place the panel may be touched.
+          auto payload = std::make_shared<std::vector<hanzi::HanziSource>>(std::move(sources));
+          QMetaObject::invokeMethod(
+              this,
+              [this, generation, payload]() {
+                applyDetailed(generation, *payload);
+              },
+              Qt::QueuedConnection);
+        },
+        [this](quint64 generation, const QString& status) {
+          Q_UNUSED(generation)
+          const auto text = std::make_shared<QString>(status);
+          QMetaObject::invokeMethod(
+              this,
+              [this, text]() {
+                applyStatus(*text);
+              },
+              Qt::QueuedConnection);
+        });
+  }
+
+  _worker->request(_generation, toHanziStrokes(_pad->strokes()));
+}
+
+void HandwritingPanel::applyDetailed(quint64 generation, const std::vector<hanzi::HanziSource>& sources) {
+  if (generation != _generation) {
+    return;
+  }
+  _sources = sources;
+  rebuildRow();
+  if (!_candidates.empty()) {
+    setHint(QString{});
+  }
+}
+
+void HandwritingPanel::applyStatus(const QString& text) {
+  setHint(text);
+}
+
+void HandwritingPanel::rebuildRow() {
+  std::vector<hanzi::HanziSource> sources;
+  if (!_modelCandidates.empty()) {
+    hanzi::HanziSource model;
+    model.origin = QStringLiteral("model");
+    model.weight = hanzi::kModelWeight;
+    for (const HccrCandidate& candidate : _modelCandidates) {
+      model.ranked.push_back(QString::fromStdString(candidate.character));
+    }
+    sources.push_back(std::move(model));
+  }
+  sources.insert(sources.end(), _sources.begin(), _sources.end());
+
+  const std::vector<hanzi::HanziCandidate> merged = hanzi::mergeSources(sources, kCandidateCount);
+  _candidates.clear();
+  _candidates.reserve(merged.size());
+  for (const hanzi::HanziCandidate& candidate : merged) {
+    RowCandidate row;
+    row.character = candidate.character;
+    row.origin = candidate.origin;
+    for (const HccrCandidate& model : _modelCandidates) {
+      if (QString::fromStdString(model.character) == candidate.character) {
+        row.probability = model.probability;
+        break;
+      }
+    }
+    _candidates.push_back(std::move(row));
+  }
+
+  if (_selected >= static_cast<int>(_candidates.size())) {
+    _selected = std::max(0, static_cast<int>(_candidates.size()) - 1);
+  }
+  refreshCandidates();
 }
 
 void HandwritingPanel::refreshCandidates() {
   for (int index = 0; index < kCandidateCount; ++index) {
     EmojiLabel* label = _candidateLabels[index];
     if (index < static_cast<int>(_candidates.size())) {
-      const HccrCandidate& candidate = _candidates[index];
-      const Emoji emoji{candidate.character, candidate.character};
+      const RowCandidate& candidate = _candidates[index];
+      const Emoji emoji{candidate.character.toStdString(), candidate.character.toStdString()};
       label->setEmoji(emoji, kCandidateGlyphSize, kCandidateGlyphSize);
-      label->setToolTip(tr("%1 (%2%)").arg(QString::fromStdString(candidate.character)).arg(candidate.probability * 100.0f, 0, 'f', 1));
+      if (candidate.probability >= 0.0) {
+        label->setToolTip(tr("%1 - %2 (%3%)").arg(candidate.character, candidate.origin).arg(candidate.probability * 100.0, 0, 'f', 1));
+      } else {
+        label->setToolTip(tr("%1 - %2").arg(candidate.character, candidate.origin));
+      }
       label->setHighlighted(index == _selected);
       label->show();
     } else {
@@ -205,7 +395,7 @@ void HandwritingPanel::commitCandidate(int index) {
   if (index < 0 || index >= static_cast<int>(_candidates.size())) {
     return;
   }
-  Q_EMIT commitRequested(QString::fromStdString(_candidates[index].character));
+  Q_EMIT commitRequested(_candidates[index].character);
 }
 
 void HandwritingPanel::setHint(const QString& text) {
