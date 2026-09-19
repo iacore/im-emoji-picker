@@ -48,13 +48,23 @@ struct TemplateCandidate {
 //                          kCells, kFeatureDim, count, the three region offsets
 //                          (page aligned), the charset name and a fingerprint of
 //                          the fonts it was built from.
-//   featuresOffset         count * kFeatureDim float32, L2 normalized
+//   featuresOffset         count * kFeatureDim float32, L2 normalized, stored
+//                          feature-major: one feature across every template, so
+//                          the cosine first pass is a vectorizable sweep
 //   distanceOffset         count * kCanvasPixels uint8, distance to centre line
+//   skeletonOffset         count * kCanvasPixels / 8 bytes, one bit per pixel:
+//                          the centre line, which is where the distance field
+//                          is zero
+//   nearOffset             the same size: every pixel within the coverage
+//                          tolerance of that centre line
 //   charactersOffset       count * uint32 code points
 //
-// The centre line itself is exactly where the distance field is zero, so it is
-// not stored twice. Building takes a few minutes over a whole charset; callers
-// are expected to run it off the GUI thread and show progress.
+// The two masks turn each direction of the coverage into a bitwise and and a
+// population count, which is why they are stored although the first is implied
+// by the distance field: a rank walks them for every shortlisted template, and
+// scanning the field instead is the difference between ten milliseconds and
+// fifty. Building takes a few tens of seconds over a whole charset; callers are
+// expected to run it off the GUI thread and show progress.
 class GlyphTemplates {
 public:
   ~GlyphTemplates();

@@ -125,12 +125,12 @@ python3 tools/hanzi/convert_data.py --graphics models/hanzi/graphics.txt --ids m
 
 The field route renders every character of the charset from the system's CJK fonts and reduces it
 to a thinned centre line; that happens once and is cached under
-`$XDG_CACHE_HOME/gazatu.xyz/im-emoji-picker/hanzi-templates` (450 MB for GBK, memory-mapped
+`$XDG_CACHE_HOME/gazatu.xyz/im-emoji-picker/hanzi-templates` (510 MiB for GBK, memory-mapped
 afterwards; `IM_EMOJI_PICKER_HANZI_CACHE` overrides the location). The first drawing you make in
-the handwriting view starts the build, which takes about 17 seconds on eight threads here, and the
-status line shows the progress. After that the two worker routes together answer in about half a
-second, and the row is updated in place. Without a CJK font installed the field route cannot build
-and says so; the trajectory and component routes keep working.
+the handwriting view starts the build, which takes about 20 seconds on eight threads here, and the
+status line shows the progress. After that the two worker routes together answer in about 60
+milliseconds, and the row is updated in place. Without a CJK font installed the field route cannot
+build and says so; the trajectory and component routes keep working.
 
 Measured on a drawn 谞 (the comparison script builds one from the reference's medians): the
 trajectory route returns 谓 谙 隋 ... - 谞 is not in Make Me a Hanzi - the field route on pen strokes is
@@ -187,9 +187,17 @@ drawing in the reference's own layout:
 ```sh
 build/hanzi-verify --strokes drawing.json          # per route, for a pad drawing
 build/hanzi-verify --strokes drawing.json --json   # machine readable
+build/hanzi-bench --mode detailed                  # what each route costs
+build/hanzi-bench --mode build --cache /tmp/cache  # a full template build
+build/hanzi-bench --print --k 10                   # the field rank with its scores
 python3 tools/hanzi/compare_hanzi.py               # the port against the Python reference
 python3 tools/hccr/drive_picker.py --strokes-json drawing.json --scan 9 --expect 谞  # through the real window
 ```
+
+`hanzi-bench` reports the load average next to its times: the field route is memory-bandwidth
+bound, and a busy machine reports numbers several times worse than an idle one. `--print` dumps the
+candidates with their scores so a change that is meant to be a pure speedup can be diffed against a
+build of the revision before it.
 
 ## Setup 😅
 

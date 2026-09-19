@@ -43,6 +43,10 @@ constexpr float kInkLevel = 0.15f;
 
 // recognize.py: rank()/rank_all() use tolerance = max(2.0, N / 32.0).
 constexpr double kCoverageTolerance = kCanvas / 32.0;
+// The stored field is whole pixels, so the comparison against the tolerance is
+// a comparison against 4: the reference compares the float field, which its own
+// uint8 cache has already truncated in the same way.
+constexpr int kCoverageSteps = static_cast<int>(kCoverageTolerance);
 
 // recognize.py: chamfer() reports this for either side being empty.
 constexpr double kEmptyDistance = 1e3;
@@ -59,7 +63,10 @@ constexpr double kMaxDistance = 255.0;
 // aligned, so the header stays inside the first page and every region can be
 // mapped on its own.
 constexpr char kMagic[4] = {'H', 'Z', 'T', '1'};
-constexpr uint32_t kFormatVersion = 1;
+// 2: the feature matrix is stored feature-major (see fillSimilarities).
+// 3: the centre-line and near-line masks are stored per template, so a rank
+//    reads two kilobytes instead of scanning a sixteen kilobyte field twice.
+constexpr uint32_t kFormatVersion = 3;
 constexpr uint64_t kRegionAlignment = 4096;
 constexpr int kCharsetNameBytes = 16;
 constexpr int kFingerprintBytes = 16;
@@ -74,11 +81,19 @@ struct Header {
   uint32_t reserved; // keeps the region offsets below at 8-byte alignment
   uint64_t featuresOffset;
   uint64_t distanceOffset;
+  uint64_t skeletonOffset;
+  uint64_t nearOffset;
   uint64_t charactersOffset;
   uint64_t fileBytes;
   char charset[kCharsetNameBytes];
   char fingerprint[kFingerprintBytes];
 };
+
+// One bit per pixel, in pixel order (y * kCanvas + x). A template's centre line
+// and the pixels within the coverage tolerance of it are both fixed, so storing
+// them turns the two coverage directions into a bitwise and and a population
+// count instead of a walk over the field.
+constexpr int kMaskBytes = kCanvasPixels / 8;
 
 static_assert(sizeof(Header) <= kRegionAlignment, "the header must fit in the first page");
 
@@ -148,6 +163,49 @@ QString firstHanziFamily() {
   return QString();
 }
 
+// ------------------------------------------------------------------- masks
+
+int countBits(const uint8_t* mask) {
+  int total = 0;
+  for (int word = 0; word < kMaskBytes / 8; ++word) {
+    uint64_t value;
+    std::memcpy(&value, mask + word * 8, sizeof(value));
+    total += __builtin_popcountll(value);
+  }
+  return total;
+}
+
+int countBitsAnd(const uint8_t* left, const uint8_t* right) {
+  int total = 0;
+  for (int word = 0; word < kMaskBytes / 8; ++word) {
+    uint64_t a;
+    uint64_t b;
+    std::memcpy(&a, left + word * 8, sizeof(a));
+    std::memcpy(&b, right + word * 8, sizeof(b));
+    total += __builtin_popcountll(a & b);
+  }
+  return total;
+}
+
+void setBit(uint8_t* mask, int pixel) {
+  mask[pixel >> 3] |= static_cast<uint8_t>(1u << (pixel & 7));
+}
+
+// The two masks of one template, as the cache stores them: the centre line, and
+// every pixel within the coverage tolerance of it.
+void maskFromDistance(const uint8_t* field, uint8_t* skeleton, uint8_t* near) {
+  std::memset(skeleton, 0, kMaskBytes);
+  std::memset(near, 0, kMaskBytes);
+  for (int pixel = 0; pixel < kCanvasPixels; ++pixel) {
+    if (field[pixel] == 0) {
+      setBit(skeleton, pixel);
+    }
+    if (field[pixel] <= kCoverageSteps) {
+      setBit(near, pixel);
+    }
+  }
+}
+
 // ------------------------------------------------------------------ geometry
 
 Mask maskFromInk(const Ink& ink, float threshold) {
@@ -174,16 +232,6 @@ Ink ribbonFromMask(const Mask& mask) {
     ribbon.value[pixel] = mask.value[pixel] ? 1.0f : 0.0f;
   }
   return ribbon;
-}
-
-// recognize.py: Templates.skeleton() - the centre line is where the distance
-// field is zero, so it costs no space in the cache.
-Mask skeletonFromDistanceField(const uint8_t* distances) {
-  Mask mask;
-  for (int pixel = 0; pixel < kCanvasPixels; ++pixel) {
-    mask.value[pixel] = distances[pixel] == 0 ? 1 : 0;
-  }
-  return mask;
 }
 
 // The 1D squared-distance transform of Felzenszwalb and Huttenlocher: given
@@ -248,60 +296,43 @@ void exactDistanceField(const Mask& mask, float* out) {
   }
 }
 
-// recognize.py: chamfer() - the symmetric mean distance between the two centre
-// lines, each read off the other's distance field.
-double chamferDistance(const Mask& querySkeleton, const uint8_t* templateField, const float* queryField, const Mask& templateSkeleton) {
-  int queryPixels = 0;
-  double toTemplate = 0.0;
-  for (int pixel = 0; pixel < kCanvasPixels; ++pixel) {
-    if (querySkeleton.value[pixel]) {
-      ++queryPixels;
-      toTemplate += templateField[pixel];
-    }
-  }
-  int templatePixels = 0;
-  double toQuery = 0.0;
-  for (int pixel = 0; pixel < kCanvasPixels; ++pixel) {
-    if (templateSkeleton.value[pixel]) {
-      ++templatePixels;
-      toQuery += queryField[pixel];
-    }
-  }
-  if (queryPixels == 0 || templatePixels == 0) {
-    return kEmptyDistance;
-  }
-  return 0.5 * (toTemplate / queryPixels + toQuery / templatePixels);
-}
-
-// recognize.py: coverage() - the symmetric fraction of centre-line pixels with
-// a counterpart within the tolerance. A dense template whose strokes miss the
-// query is penalised by the template->query direction, which a mean distance
-// would not do.
-double coverageFraction(const Mask& querySkeleton, const uint8_t* templateField, const float* queryField, const Mask& templateSkeleton, double tolerance) {
-  int queryPixels = 0;
-  int queryHits = 0;
-  for (int pixel = 0; pixel < kCanvasPixels; ++pixel) {
-    if (querySkeleton.value[pixel]) {
-      ++queryPixels;
-      if (templateField[pixel] <= tolerance) {
-        ++queryHits;
-      }
-    }
-  }
-  int templatePixels = 0;
-  int templateHits = 0;
-  for (int pixel = 0; pixel < kCanvasPixels; ++pixel) {
-    if (templateSkeleton.value[pixel]) {
-      ++templatePixels;
-      if (queryField[pixel] <= tolerance) {
-        ++templateHits;
-      }
-    }
-  }
-  if (queryPixels == 0 || templatePixels == 0) {
+// One template's coverage of a query, from the two masks: exact integer hit
+// counts, so the value is the reference's to the last bit. This is the primary
+// key of the ordering and the only thing a rank needs for most templates.
+double coverageFromMasks(const uint8_t* queryPixels, int queryPixelCount, const uint8_t* queryNear, const uint8_t* skeleton, const uint8_t* near,
+                         int templatePixels) {
+  if (queryPixelCount == 0 || templatePixels == 0) {
     return 0.0;
   }
-  return 0.5 * (static_cast<double>(queryHits) / queryPixels + static_cast<double>(templateHits) / templatePixels);
+  const int queryHits = countBitsAnd(queryPixels, near);
+  const int templateHits = countBitsAnd(queryNear, skeleton);
+  return 0.5 * (static_cast<double>(queryHits) / queryPixelCount + static_cast<double>(templateHits) / templatePixels);
+}
+
+// recognize.py: chamfer() - the symmetric mean distance between the two centre
+// lines, each read off the other's distance field. It is the tie-break behind
+// the coverage, so a rank only pays for it where it can still change the answer.
+double chamferDistance(const uint16_t* queryPixels, int queryPixelCount, const float* queryField, const uint8_t* templateField, const uint8_t* templateSkeleton, int templatePixels) {
+  if (queryPixelCount == 0 || templatePixels == 0) {
+    return kEmptyDistance;
+  }
+  double toTemplate = 0.0;
+  for (int p = 0; p < queryPixelCount; ++p) {
+    toTemplate += templateField[queryPixels[p]];
+  }
+  double toQuery = 0.0;
+  for (int word = 0; word < kMaskBytes / 8; ++word) {
+    uint64_t bits;
+    std::memcpy(&bits, templateSkeleton + word * 8, sizeof(bits));
+    while (bits != 0) {
+      // A word is eight bytes and a byte holds eight pixels, so the word index
+      // counts 64 pixels; the trailing-zero count is the pixel within it.
+      const int pixel = word * 64 + static_cast<int>(__builtin_ctzll(bits));
+      toQuery += queryField[pixel];
+      bits &= bits - 1;
+    }
+  }
+  return 0.5 * (toTemplate / queryPixelCount + toQuery / templatePixels);
 }
 
 // recognize.py: render_char() through Qt. PIL anchors "mm" on the text box
@@ -470,13 +501,17 @@ struct GlyphTemplates::Impl {
   uchar* mapping = nullptr;
   const float* features = nullptr;
   const uint8_t* distances = nullptr;
+  const uint8_t* skeletons = nullptr;
+  const uint8_t* near = nullptr;
   const uint32_t* codes = nullptr;
   int count = 0;
   QString charset;
   QString fingerprint;
   std::vector<QString> characters;
-  std::vector<float> ownedFeatures;
+  std::vector<float> ownedFeatures; // feature-major, transposed on adoption
   std::vector<uint8_t> ownedDistances;
+  std::vector<uint8_t> ownedSkeletons;
+  std::vector<uint8_t> ownedNear;
   QHash<QString, int> index;
 
   ~Impl() {
@@ -489,16 +524,44 @@ struct GlyphTemplates::Impl {
     return distances + static_cast<size_t>(i) * kCanvasPixels;
   }
 
-  const float* featureRow(int i) const {
-    return features + static_cast<size_t>(i) * kFeatureDim;
+  // One feature across every template: a rank reads the matrix a feature at a
+  // time, which turns the cosine into one vectorizable pass over contiguous
+  // templates instead of a row-at-a-time reduction.
+  const float* featureColumn(int d) const {
+    return features + static_cast<size_t>(d) * count;
+  }
+
+  const uint8_t* skeletonMask(int i) const {
+    return skeletons + static_cast<size_t>(i) * kMaskBytes;
+  }
+
+  const uint8_t* nearMask(int i) const {
+    return near + static_cast<size_t>(i) * kMaskBytes;
   }
 
   // Points the regions at the owned arrays and builds the lookup the component
   // route filters its candidates with.
   void adoptOwned() {
     count = static_cast<int>(ownedFeatures.size() / kFeatureDim);
+    // The arrays handed in come from the reference's numpy cache, which is
+    // row-major; the engine wants feature-major, so they are transposed once.
+    std::vector<float> transposed(ownedFeatures.size());
+    for (int i = 0; i < count; ++i) {
+      for (int d = 0; d < kFeatureDim; ++d) {
+        transposed[static_cast<size_t>(d) * count + i] = ownedFeatures[static_cast<size_t>(i) * kFeatureDim + d];
+      }
+    }
+    ownedFeatures = std::move(transposed);
     features = ownedFeatures.data();
     distances = ownedDistances.data();
+    ownedSkeletons.assign(static_cast<size_t>(count) * kMaskBytes, 0);
+    ownedNear.assign(static_cast<size_t>(count) * kMaskBytes, 0);
+    for (int i = 0; i < count; ++i) {
+      maskFromDistance(distances + static_cast<size_t>(i) * kCanvasPixels, ownedSkeletons.data() + static_cast<size_t>(i) * kMaskBytes,
+                       ownedNear.data() + static_cast<size_t>(i) * kMaskBytes);
+    }
+    skeletons = ownedSkeletons.data();
+    near = ownedNear.data();
     index.clear();
     for (int i = 0; i < count; ++i) {
       index.insert(characters[static_cast<size_t>(i)], i);
@@ -567,11 +630,15 @@ std::unique_ptr<GlyphTemplates> GlyphTemplates::open(const QString& charset, con
     failure = QStringLiteral("%1 holds no templates").arg(path);
   } else if (storedCharset != charset) {
     failure = QStringLiteral("%1 holds charset %2, not %3").arg(path, storedCharset, charset);
-  } else if (header.featuresOffset < sizeof(Header) || header.distanceOffset < header.featuresOffset || header.charactersOffset < header.distanceOffset) {
+  } else if (header.featuresOffset < sizeof(Header) || header.distanceOffset < header.featuresOffset || header.skeletonOffset < header.distanceOffset || header.nearOffset < header.skeletonOffset || header.charactersOffset < header.nearOffset) {
     failure = QStringLiteral("%1 has a damaged header").arg(path);
   } else if (header.fileBytes != static_cast<uint64_t>(fileBytes)) {
     failure = QStringLiteral("%1 is %2 bytes, its header claims %3").arg(path).arg(fileBytes).arg(header.fileBytes);
-  } else if (header.featuresOffset + static_cast<uint64_t>(header.count) * kFeatureDim * sizeof(float) > header.distanceOffset || header.distanceOffset + static_cast<uint64_t>(header.count) * kCanvasPixels > header.charactersOffset || header.charactersOffset + static_cast<uint64_t>(header.count) * sizeof(uint32_t) > header.fileBytes) {
+  } else if (header.featuresOffset + static_cast<uint64_t>(header.count) * kFeatureDim * sizeof(float) > header.distanceOffset ||
+             header.distanceOffset + static_cast<uint64_t>(header.count) * kCanvasPixels > header.skeletonOffset ||
+             header.skeletonOffset + static_cast<uint64_t>(header.count) * kMaskBytes > header.nearOffset ||
+             header.nearOffset + static_cast<uint64_t>(header.count) * kMaskBytes > header.charactersOffset ||
+             header.charactersOffset + static_cast<uint64_t>(header.count) * sizeof(uint32_t) > header.fileBytes) {
     failure = QStringLiteral("%1 has regions that do not fit the file").arg(path);
   }
   if (!failure.isEmpty()) {
@@ -591,6 +658,8 @@ std::unique_ptr<GlyphTemplates> GlyphTemplates::open(const QString& charset, con
   impl.fingerprint = QString::fromLatin1(header.fingerprint, strnlen(header.fingerprint, kFingerprintBytes));
   impl.features = reinterpret_cast<const float*>(mapping + header.featuresOffset);
   impl.distances = mapping + header.distanceOffset;
+  impl.skeletons = mapping + header.skeletonOffset;
+  impl.near = mapping + header.nearOffset;
   impl.codes = reinterpret_cast<const uint32_t*>(mapping + header.charactersOffset);
   impl.characters.reserve(static_cast<size_t>(impl.count));
   for (int i = 0; i < impl.count; ++i) {
@@ -639,7 +708,9 @@ std::unique_ptr<GlyphTemplates> GlyphTemplates::build(const QString& charset, co
   const int count = static_cast<int>(characters.size());
   const uint64_t featuresOffset = kRegionAlignment;
   const uint64_t distanceOffset = alignRegion(featuresOffset + static_cast<uint64_t>(count) * kFeatureDim * sizeof(float));
-  const uint64_t charactersOffset = alignRegion(distanceOffset + static_cast<uint64_t>(count) * kCanvasPixels);
+  const uint64_t skeletonOffset = alignRegion(distanceOffset + static_cast<uint64_t>(count) * kCanvasPixels);
+  const uint64_t nearOffset = alignRegion(skeletonOffset + static_cast<uint64_t>(count) * kMaskBytes);
+  const uint64_t charactersOffset = alignRegion(nearOffset + static_cast<uint64_t>(count) * kMaskBytes);
   const uint64_t fileBytes = charactersOffset + static_cast<uint64_t>(count) * sizeof(uint32_t);
 
   if (!QDir().mkpath(cacheDirectory)) {
@@ -678,6 +749,8 @@ std::unique_ptr<GlyphTemplates> GlyphTemplates::build(const QString& charset, co
   header.count = static_cast<uint32_t>(count);
   header.featuresOffset = featuresOffset;
   header.distanceOffset = distanceOffset;
+  header.skeletonOffset = skeletonOffset;
+  header.nearOffset = nearOffset;
   header.charactersOffset = charactersOffset;
   header.fileBytes = fileBytes;
   const QByteArray charsetBytes = charset.toUtf8();
@@ -688,6 +761,8 @@ std::unique_ptr<GlyphTemplates> GlyphTemplates::build(const QString& charset, co
 
   float* features = reinterpret_cast<float*>(mapping + featuresOffset);
   uint8_t* distances = mapping + distanceOffset;
+  uint8_t* skeletons = mapping + skeletonOffset;
+  uint8_t* near = mapping + nearOffset;
   uint32_t* codes = reinterpret_cast<uint32_t*>(mapping + charactersOffset);
 
   // recognize.py: build() runs the same loop for every character, one
@@ -707,43 +782,61 @@ std::unique_ptr<GlyphTemplates> GlyphTemplates::build(const QString& charset, co
         threadFonts.push_back(templateQFont(font));
       }
       std::array<float, kFeatureDim> feature{};
-      for (int i = begin; i < end; ++i) {
-        Ink ink;
-        for (const QFont& font : threadFonts) {
-          const Ink rendered = renderCharacter(characters[static_cast<size_t>(i)], font);
-          for (int pixel = 0; pixel < kCanvasPixels; ++pixel) {
-            ink.value[pixel] += rendered.value[pixel];
+      // The features are stored feature-major, so a character's vector is
+      // gathered into this block and written out by feature: writing each value
+      // straight to its column would touch a cache line per value. A chunk
+      // keeps the block small enough to stay in cache.
+      constexpr int kChunk = 128;
+      std::vector<float> block(static_cast<size_t>(kChunk) * kFeatureDim);
+      for (int chunk = begin; chunk < end; chunk += kChunk) {
+        const int stop = std::min(end, chunk + kChunk);
+        for (int i = chunk; i < stop; ++i) {
+          Ink ink;
+          for (const QFont& font : threadFonts) {
+            const Ink rendered = renderCharacter(characters[static_cast<size_t>(i)], font);
+            for (int pixel = 0; pixel < kCanvasPixels; ++pixel) {
+              ink.value[pixel] += rendered.value[pixel];
+            }
+          }
+          const float scale = 1.0f / static_cast<float>(threadFonts.size());
+          for (float& value : ink.value) {
+            value *= scale;
+          }
+          Mask skeleton = thinInk(ink);
+          if (!skeleton.any()) {
+            // No font has this glyph: the unthinned ink is all there is.
+            skeleton = maskFromInk(ink, kInkLevel);
+          }
+          Mask ribbon;
+          dilateMask(skeleton, ribbon, 1);
+          const Ink ribbonInk = ribbonFromMask(ribbon);
+          inkFeatures(ribbonInk, feature.data());
+          double norm = 0.0;
+          for (const float value : feature) {
+            norm += static_cast<double>(value) * value;
+          }
+          norm = std::sqrt(norm);
+          if (norm > 0.0) {
+            for (float& value : feature) {
+              value = static_cast<float>(value / norm);
+            }
+          }
+          std::memcpy(&block[static_cast<size_t>(i - chunk) * kFeatureDim], feature.data(), kFeatureDim * sizeof(float));
+          uint8_t* distance = distances + static_cast<size_t>(i) * kCanvasPixels;
+          distanceTransform(skeleton, distance);
+          maskFromDistance(distance, skeletons + static_cast<size_t>(i) * kMaskBytes, near + static_cast<size_t>(i) * kMaskBytes);
+          codes[i] = characters[static_cast<size_t>(i)].at(0).unicode();
+          const int done = ++finished;
+          if (progress && done % 256 == 0) {
+            progress(done, count);
           }
         }
-        const float scale = 1.0f / static_cast<float>(threadFonts.size());
-        for (float& value : ink.value) {
-          value *= scale;
-        }
-        Mask skeleton = thinInk(ink);
-        if (!skeleton.any()) {
-          // No font has this glyph: the unthinned ink is all there is.
-          skeleton = maskFromInk(ink, kInkLevel);
-        }
-        Mask ribbon;
-        dilateMask(skeleton, ribbon, 1);
-        const Ink ribbonInk = ribbonFromMask(ribbon);
-        inkFeatures(ribbonInk, feature.data());
-        double norm = 0.0;
-        for (const float value : feature) {
-          norm += static_cast<double>(value) * value;
-        }
-        norm = std::sqrt(norm);
-        if (norm > 0.0) {
-          for (float& value : feature) {
-            value = static_cast<float>(value / norm);
+        const int rows = stop - chunk;
+        for (int d = 0; d < kFeatureDim; ++d) {
+          float* column = features + static_cast<size_t>(d) * count + chunk;
+          for (int row = 0; row < rows; ++row) {
+            column[row] = block[static_cast<size_t>(row) * kFeatureDim + d];
           }
-        }
-        std::memcpy(features + static_cast<size_t>(i) * kFeatureDim, feature.data(), kFeatureDim * sizeof(float));
-        distanceTransform(skeleton, distances + static_cast<size_t>(i) * kCanvasPixels);
-        codes[i] = characters[static_cast<size_t>(i)].at(0).unicode();
-        const int done = ++finished;
-        if (progress && done % 256 == 0) {
-          progress(done, count);
         }
       }
     });
@@ -793,6 +886,69 @@ std::unique_ptr<GlyphTemplates> GlyphTemplates::fromArrays(std::vector<QString> 
   return templates;
 }
 
+// ---------------------------------------------------------------- query side
+
+// The query's centre-line pixels in ascending order plus its distance field:
+// every shortlisted template is scored against exactly these, so the query side
+// is prepared once per rank instead of walked once per template.
+struct QuerySide {
+  std::array<uint8_t, kMaskBytes> pixels{};
+  std::array<uint8_t, kMaskBytes> near{};
+  std::vector<uint16_t> pixelList;
+  std::array<float, kCanvasPixels> field{};
+  int pixelCount = 0;
+};
+
+QuerySide prepareQuery(const Mask& skeleton) {
+  QuerySide query;
+  query.pixelList.reserve(1024);
+  for (int pixel = 0; pixel < kCanvasPixels; ++pixel) {
+    if (skeleton.value[pixel]) {
+      setBit(query.pixels.data(), pixel);
+      query.pixelList.push_back(static_cast<uint16_t>(pixel));
+    }
+  }
+  query.pixelCount = static_cast<int>(query.pixelList.size());
+  exactDistanceField(skeleton, query.field.data());
+  for (int pixel = 0; pixel < kCanvasPixels; ++pixel) {
+    if (query.field[pixel] <= kCoverageTolerance) {
+      setBit(query.near.data(), pixel);
+    }
+  }
+  return query;
+}
+
+// recognize.py: rank()'s first pass, the feature cosine over every template.
+//
+// One feature at a time across all templates: the inner loop has no reduction,
+// so it vectorizes as written, and the accumulator stays in the last level cache
+// while the matrix streams past once. The summation order per template is the
+// feature order, which is the order the reference's BLAS reduces in, and the
+// sum is taken in double because the reference's float32 product carries more
+// round-off than that (measured 5.8e-7 against the exact sum on 谞).
+// The pass is 26.7 million multiply-adds per rank, and a baseline x86-64 build
+// cannot vectorize it at all: GCC declines to vectorize floating point loops
+// without an ISA that offers wider registers. The clones carry both versions -
+// every machine runs the widest one it has, and the package stays valid for the
+// ones that have neither. The accumulator is double in both, each template's sum
+// keeps the feature order, and the clones only differ in how many of them are
+// added at once, so a machine that takes the AVX2 clone reports the same
+// candidates as one that does not.
+__attribute__((target_clones("default", "avx2")))
+void fillSimilarities(const float* features, int count, const float* queryFeature, float* similarities) {
+  std::vector<double> accumulator(static_cast<size_t>(count), 0.0);
+  for (int d = 0; d < kFeatureDim; ++d) {
+    const double query = queryFeature[d];
+    const float* column = features + static_cast<size_t>(d) * count;
+    for (int i = 0; i < count; ++i) {
+      accumulator[static_cast<size_t>(i)] += static_cast<double>(column[i]) * query;
+    }
+  }
+  for (int i = 0; i < count; ++i) {
+    similarities[i] = static_cast<float>(accumulator[static_cast<size_t>(i)]);
+  }
+}
+
 // ------------------------------------------------------------------- matching
 
 std::vector<TemplateCandidate> GlyphTemplates::rank(const Ink& query, int k, int refine) const {
@@ -817,14 +973,7 @@ std::vector<TemplateCandidate> GlyphTemplates::rank(const Ink& query, int k, int
   // (measured 5.8e-7 against the exact sum on 谞), and the exact sum lands
   // closer to the reference's value than a second float32 reduction does.
   std::vector<float> similarities(static_cast<size_t>(impl.count), 0.0f);
-  for (int i = 0; i < impl.count; ++i) {
-    const float* row = impl.featureRow(i);
-    double sum = 0.0;
-    for (int d = 0; d < kFeatureDim; ++d) {
-      sum += static_cast<double>(row[d]) * queryFeature[d];
-    }
-    similarities[static_cast<size_t>(i)] = static_cast<float>(sum);
-  }
+  fillSimilarities(impl.features, impl.count, queryFeature.data(), similarities.data());
 
   const int shortlistSize = std::min(impl.count, std::max(refine, k));
   std::vector<int> shortlist(static_cast<size_t>(impl.count));
@@ -839,19 +988,38 @@ std::vector<TemplateCandidate> GlyphTemplates::rank(const Ink& query, int k, int
   };
   std::partial_sort(shortlist.begin(), shortlist.begin() + shortlistSize, shortlist.end(), betterSimilarity);
 
-  std::array<float, kCanvasPixels> queryField{};
-  exactDistanceField(querySkeleton, queryField.data());
+  const QuerySide querySide = prepareQuery(querySkeleton);
 
-  std::vector<Scored> scored;
-  scored.reserve(static_cast<size_t>(shortlistSize));
+  // The whole shortlist by coverage, which is the ordering's primary key and
+  // costs two bitwise ands per template.
+  std::vector<double> coverages(static_cast<size_t>(shortlistSize), 0.0);
   for (int s = 0; s < shortlistSize; ++s) {
     const int i = shortlist[static_cast<size_t>(s)];
-    const uint8_t* templateField = impl.distanceRow(i);
-    const Mask templateSkeleton = skeletonFromDistanceField(templateField);
+    coverages[static_cast<size_t>(s)] = coverageFromMasks(querySide.pixels.data(), querySide.pixelCount, querySide.near.data(), impl.skeletonMask(i), impl.nearMask(i),
+                                                          countBits(impl.skeletonMask(i)));
+  }
+
+  // The distance only breaks ties behind the coverage, so it is computed for the
+  // candidates that can still reach the answer: those at or above the k-th best
+  // coverage. Everything below that sorts behind all of them, so the first k of
+  // this order and of the reference's whole-shortlist order are the same.
+  const int wanted = std::min(k, shortlistSize);
+  std::vector<double> ranked(coverages);
+  std::nth_element(ranked.begin(), ranked.begin() + (wanted - 1), ranked.end(), std::greater<double>());
+  const double cutoff = ranked[static_cast<size_t>(wanted - 1)];
+
+  std::vector<Scored> scored;
+  scored.reserve(static_cast<size_t>(wanted));
+  for (int s = 0; s < shortlistSize; ++s) {
+    if (coverages[static_cast<size_t>(s)] < cutoff) {
+      continue;
+    }
+    const int i = shortlist[static_cast<size_t>(s)];
+    const uint8_t* skeleton = impl.skeletonMask(i);
     Scored entry;
     entry.index = i;
-    entry.coverage = coverageFraction(querySkeleton, templateField, queryField.data(), templateSkeleton, kCoverageTolerance);
-    entry.distance = chamferDistance(querySkeleton, templateField, queryField.data(), templateSkeleton);
+    entry.coverage = coverages[static_cast<size_t>(s)];
+    entry.distance = chamferDistance(querySide.pixelList.data(), querySide.pixelCount, querySide.field.data(), impl.distanceRow(i), skeleton, countBits(skeleton));
     entry.similarity = similarities[static_cast<size_t>(i)];
     scored.push_back(entry);
   }
@@ -860,9 +1028,9 @@ std::vector<TemplateCandidate> GlyphTemplates::rank(const Ink& query, int k, int
   std::stable_sort(scored.begin(), scored.end(), betterScored);
 
   std::vector<TemplateCandidate> candidates;
-  const int wanted = std::min(k, static_cast<int>(scored.size()));
-  candidates.reserve(static_cast<size_t>(wanted));
-  for (int i = 0; i < wanted; ++i) {
+  const int answer = std::min(k, static_cast<int>(scored.size()));
+  candidates.reserve(static_cast<size_t>(answer));
+  for (int i = 0; i < answer; ++i) {
     candidates.push_back(candidateFrom(impl.characters[static_cast<size_t>(scored[static_cast<size_t>(i)].index)], scored[static_cast<size_t>(i)]));
   }
   return candidates;
@@ -877,19 +1045,17 @@ std::vector<TemplateCandidate> GlyphTemplates::rankAll(const Ink& query, int k) 
   if (!querySkeleton.any()) {
     return {};
   }
-  std::array<float, kCanvasPixels> queryField{};
-  exactDistanceField(querySkeleton, queryField.data());
+  const QuerySide querySide = prepareQuery(querySkeleton);
 
   // recognize.py: rank_all() scores every row and sorts on coverage alone, so
-  // the cosine first pass can be checked without a shortlist.
+  // the cosine first pass can be checked without a shortlist. The candidates
+  // carry no distance and no similarity, exactly as the reference returns them.
   std::vector<Scored> scored;
   scored.reserve(static_cast<size_t>(impl.count));
   for (int i = 0; i < impl.count; ++i) {
-    const uint8_t* templateField = impl.distanceRow(i);
-    const Mask templateSkeleton = skeletonFromDistanceField(templateField);
     Scored entry;
     entry.index = i;
-    entry.coverage = coverageFraction(querySkeleton, templateField, queryField.data(), templateSkeleton, kCoverageTolerance);
+    entry.coverage = coverageFromMasks(querySide.pixels.data(), querySide.pixelCount, querySide.near.data(), impl.skeletonMask(i), impl.nearMask(i), countBits(impl.skeletonMask(i)));
     scored.push_back(entry);
   }
   const auto betterCoverage = [](const Scored& a, const Scored& b) {
