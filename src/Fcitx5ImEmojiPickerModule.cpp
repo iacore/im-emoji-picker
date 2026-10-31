@@ -98,8 +98,12 @@ void Fcitx5ImEmojiPickerModule::keyEvent(fcitx::KeyEvent& keyEvent) {
     return;
   }
 
-  QString _text = QString::fromStdString(keyEvent.key().toString());
-  _text = _text.right(1);
+  // The raw key, not the normalized one: fcitx folds `A` into `a` plus Shift so
+  // shortcut matching can ignore case, which turned the `Pi` typed here into
+  // `pi` - a different Lean abbreviation. The keysym's own character is what the
+  // key types, so shifted punctuation and other layouts come out right too.
+  const fcitx::Key rawKey = keyEvent.rawKey().isValid() ? keyEvent.rawKey() : keyEvent.key();
+  QString _text = QString::fromStdString(fcitx::Key::keySymToUTF8(rawKey.sym()));
   QKeyEvent::Type _type = keyEvent.isRelease() ? QKeyEvent::KeyRelease : QKeyEvent::KeyPress;
   int _key = 0;
   switch (keyEvent.key().code()) {
@@ -149,15 +153,6 @@ void Fcitx5ImEmojiPickerModule::keyEvent(fcitx::KeyEvent& keyEvent) {
   }
   if (keyEvent.key().states() & fcitx::KeyState::Shift) {
     _modifiers |= Qt::ShiftModifier;
-  }
-
-  switch (keyEvent.key().code()) {
-  case KEYCODE_SPACE: // FcitxKey_Space:
-    _text = " ";
-    break;
-  case KEYCODE_UNDERSCORE: // FcitxKey_Underscore:
-    _text = "_";
-    break;
   }
 
   QKeyEvent* qevent = createKeyEventWithUserPreferences(_type, _key, _modifiers, _text);

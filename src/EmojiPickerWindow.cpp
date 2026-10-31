@@ -376,26 +376,29 @@ void EmojiPickerWindow::updateSearchCompletion() {
   QString search = _searchEdit->text();
 
   QString completion = "";
-  if (selectedEmojiLabel()) {
+  int indexOfSearch = -1;
+  if (!search.isEmpty() && selectedEmojiLabel()) {
     const Emoji& emoji = selectedEmojiLabel()->emoji();
 
-    emojiMatchesSearch(emoji, search, SearchMode::AUTO, completion);
+    if (emojiMatchesSearch(emoji, search, SearchMode::AUTO, completion)) {
+      indexOfSearch = completion.indexOf(search, 0, Qt::CaseInsensitive);
+    }
   }
 
-  int indexOfSearch = std::max(completion.indexOf(search, 0, Qt::CaseInsensitive), 0);
-#if QT_VERSION >= QT_VERSION_CHECK(5, 11, 0)
-  int offsetOfSearch = _searchEdit->fontMetrics().horizontalAdvance(completion.left(indexOfSearch));
-#else
-  int offsetOfSearch = _searchEdit->fontMetrics().width(completion.left(indexOfSearch));
-#endif
-
-  if (completion != "" && !_searchEdit->hasSelectedText()) {
-    _searchEdit->setText(completion.mid(indexOfSearch, search.length()));
+  if (indexOfSearch < 0) {
+    _searchCompletion->setTextMargins(0, 0, 0, 0);
+    _searchCompletion->setText("");
+    return;
   }
 
-  _searchEdit->setTextMargins(offsetOfSearch, 0, 0, 0);
+  // Only the part the user has not typed is drawn, after the text as typed. The
+  // query itself is never rewritten: `Pi` and `pi` are two different Lean
+  // abbreviations, and recasing what someone typed is how `Pi` silently became
+  // `pi` between two keystrokes.
+  const int typedWidth = _searchEdit->fontMetrics().horizontalAdvance(search);
 
-  _searchCompletion->setText(completion);
+  _searchCompletion->setTextMargins(typedWidth, 0, 0, 0);
+  _searchCompletion->setText(completion.mid(indexOfSearch + search.length()));
 }
 
 void EmojiPickerWindow::addItemToEmojiList(QLayoutItem* emojiLayoutItem, EmojiLabel* label, int colspan, int& row, int& column) {
@@ -749,7 +752,7 @@ QKeyEvent* createKeyEventWithUserPreferences(QEvent::Type _type, int _key, Qt::K
   }
 
   for (const auto& [key, target] : customHotKeys) {
-    if (_text.at(0).toLatin1() == key) {
+    if (!_text.isEmpty() && _text.at(0).toLatin1() == key) {
       _key = target[0];
       _modifiers = Qt::NoModifier;
       if (target[0] & Qt::ShiftModifier) {
@@ -775,7 +778,7 @@ EmojiAction getEmojiActionForQKeyEvent(const QKeyEvent* event) {
   // TODO: ctrl+d = select word
   // TODO: key values instead of key codes
 
-  if (event->key() == 0 && !isascii(event->text().at(0).toLatin1())) {
+  if (event->key() == 0 && (event->text().isEmpty() || !isascii(event->text().at(0).toLatin1()))) {
     return EmojiAction::INVALID;
   }
 
