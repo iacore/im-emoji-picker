@@ -1,6 +1,8 @@
 #include "EmojiPickerWindow.hpp"
 #include "EmojiLabel.hpp"
 #include "HandwritingPanel.hpp"
+#include "LeanSymbols.hpp"
+#include "UnicodeSearch.hpp"
 #include "emojis.hpp"
 #include "kaomojis.hpp"
 #include <QApplication>
@@ -22,6 +24,25 @@
 
 Emoji convertKaomojiToEmoji(const Kaomoji& kaomoji) {
   return Emoji{kaomoji.name, kaomoji.text, -1};
+}
+
+// Entries built from a query carry a version no emoji has, so they stay out of
+// the recently-used list: a character found by name is a search result, not
+// something the picker offers before a query is typed.
+constexpr short kSearchOnlyVersion = -2;
+constexpr size_t kMaxSearchResults = 60;
+
+Emoji lean4Emoji(const LeanSymbol& symbol) {
+  return Emoji{symbol.abbreviation, symbol.symbol, kSearchOnlyVersion};
+}
+
+Emoji unicodeEmoji(const UnicodeMatch& match) {
+  const uint codePoint = match.codePoint;
+  const QString name = match.name.isEmpty()
+    ? QString("U+%1").arg(codePoint, 4, 16, QChar('0')).toUpper()
+    : match.name;
+
+  return Emoji{name.toStdString(), QString::fromUcs4(&codePoint, 1).toStdString(), kSearchOnlyVersion};
 }
 
 void moveQWidgetToCenter(QWidget* window) {
@@ -457,6 +478,10 @@ void EmojiPickerWindow::updateEmojiList() {
   case ViewMode::MRU: {
     if (search == "") {
       for (const auto& emoji : _emojiMRU) {
+        if (emoji.version == kSearchOnlyVersion) {
+          continue;
+        }
+
         auto emojiLayoutItem = getEmojiLayoutItem(emoji);
         auto label = static_cast<EmojiLabel*>(emojiLayoutItem->widget());
 
@@ -471,6 +496,29 @@ void EmojiPickerWindow::updateEmojiList() {
 
   case ViewMode::LIST: {
     std::unordered_set<std::string> addedEmojis; // std::string_view would be better
+    const bool searching = search != "";
+
+    auto addEmoji = [&](const Emoji& emoji) {
+      if (addedEmojis.count(emoji.code) != 0) {
+        return;
+      }
+
+      if (_disabledEmojis.count(emoji.code) != 0) {
+        return;
+      }
+
+      auto emojiLayoutItem = getEmojiLayoutItem(emoji);
+      auto label = static_cast<EmojiLabel*>(emojiLayoutItem->widget());
+
+      if (row <= 5) {
+        label->show();
+      }
+
+      addItemToEmojiList(&*emojiLayoutItem, label, 0, row, column);
+
+      addedEmojis.emplace(emoji.code);
+    };
+
     auto addEmojis = [&](SearchMode searchMode) {
       for (const auto& emoji : emojis) {
         if (addedEmojis.count(emoji.code) != 0) {
@@ -481,32 +529,60 @@ void EmojiPickerWindow::updateEmojiList() {
           continue;
         }
 
-        if (search != "" && !emojiMatchesSearch(emoji, search, searchMode)) {
+        if (searching && !emojiMatchesSearch(emoji, search, searchMode)) {
           continue;
         }
 
-        auto emojiLayoutItem = getEmojiLayoutItem(emoji);
-        auto label = static_cast<EmojiLabel*>(emojiLayoutItem->widget());
+        addEmoji(emoji);
 
-        if (row <= 5) {
-          label->show();
-        }
-
-        addItemToEmojiList(&*emojiLayoutItem, label, 0, row, column);
-
-        addedEmojis.emplace(emoji.code);
-
-        if (search != "" && row >= 5) {
+        if (searching && row >= 5) {
           break;
         }
       }
     };
 
-    if (search != "") {
-      addEmojis(SearchMode::EQUALS);
-      addEmojis(SearchMode::STARTS_WITH);
+    if (!searching) {
+      addEmojis(SearchMode::AUTO);
+      break;
     }
+
+    // A typed query is answered by three sources, in this order: the Lean 4
+    // abbreviation table, the emoji names and aliases, and finally the Unicode
+    // character names. The first two are not character sources, so a match
+    // there ends the search; the character space is walked only when neither
+    // knows the word. Nothing here runs before a query is typed, which is why
+    // no character outside the emoji set shows up in the plain list.
+    if (const LeanSymbol* exact = findExactLeanSymbol(search)) {
+      // An exact abbreviation is the symbol the author meant: choose it.
+      addEmoji(lean4Emoji(*exact));
+      break;
+    }
+
+    std::vector<const LeanSymbol*> leanMatches;
+    searchLeanSymbols(search, leanMatches, kMaxSearchResults);
+    for (const LeanSymbol* symbol : leanMatches) {
+      if (row > 6) {
+        break;
+      }
+      addEmoji(lean4Emoji(*symbol));
+    }
+    if (!addedEmojis.empty()) {
+      break;
+    }
+
+    addEmojis(SearchMode::EQUALS);
+    addEmojis(SearchMode::STARTS_WITH);
     addEmojis(SearchMode::AUTO);
+    if (!addedEmojis.empty()) {
+      break;
+    }
+
+    for (const UnicodeMatch& match : searchUnicode(search, kMaxSearchResults)) {
+      if (row > 6) {
+        break;
+      }
+      addEmoji(unicodeEmoji(match));
+    }
     break;
   }
 
@@ -793,7 +869,7 @@ EmojiAction getEmojiActionForQKeyEvent(const QKeyEvent* event) {
 void EmojiPickerWindow::commitEmoji(const Emoji& emoji, bool isRealEmoji, bool closeAfter) {
   commitText(emoji.code);
 
-  if (isRealEmoji || _settings.saveKaomojiInMRU()) {
+  if ((isRealEmoji || _settings.saveKaomojiInMRU()) && emoji.version != kSearchOnlyVersion) {
     _emojiMRU.erase(std::remove(_emojiMRU.begin(), _emojiMRU.end(), emoji), _emojiMRU.end());
     _emojiMRU.insert(_emojiMRU.begin(), emoji);
     while (_emojiMRU.size() > 40) {

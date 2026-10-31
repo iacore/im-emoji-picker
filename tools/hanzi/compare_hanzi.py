@@ -34,7 +34,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-REFERENCE = Path(os.environ.get("HANZI_HANDWRITING_REFERENCE", "/home/user/computing/lib/hanzi-handwriting"))
+REFERENCE = Path(os.environ.get("HANZI_HANDWRITING_REFERENCE", Path.home() / "computing/lib/hanzi-handwriting"))
 GLYPH = "谞"
 GLYPH_FONT = ("/usr/share/fonts/noto-cjk/NotoSerifCJK-Regular.ttc", 2)
 

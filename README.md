@@ -199,6 +199,38 @@ bound, and a busy machine reports numbers several times worse than an idle one. 
 candidates with their scores so a change that is meant to be a pure speedup can be diffed against a
 build of the revision before it.
 
+## Searching for characters 🔎
+
+Typing into the search box answers from three sources, in this order, and the
+first source that knows the query ends the search:
+
+1. **Lean 4 abbreviations.** The table the Lean 4 VS Code extension substitutes
+   for `\...` is built in, so `pi` gives `π`, `forall` gives `∀`, `to` gives `→`.
+   An exact abbreviation is the only candidate, so `return` commits it: an
+   author who typed `pi` meant `π`, not a face.
+2. **Emoji names and aliases**, as before: `smile` finds 🙂.
+3. **Unicode character names**, through ICU: `greek small letter pi` finds `π`,
+   and so does the code point itself (`03c0`, `U+03C0`, `0x3c0`).
+
+Characters outside the emoji set never show up before something is typed: the
+Lean and Unicode sources run only for a non-empty query, and their entries stay
+out of the recently-used view.
+
+The table is generated from the extension's own `dist/extension.js`, so it can
+be refreshed whenever that extension changes:
+
+```sh
+python3 tools/lean4/update_symbols.py   # writes src/res/lean4-symbols.tsv
+```
+
+`search-verify` prints what a query resolves to, and what the Unicode fallback
+costs, without an input method in the way:
+
+```sh
+build/search-verify pi 'greek small letter pi'
+build/search-verify --time 03c0
+```
+
 ## Setup 😅
 
 After installing *I'm Emoji Picker* theres some steps required to make it work.
@@ -347,6 +379,7 @@ size=1
 ### Dependencies
 
 - Qt5 (core, gui, widgets)
+- ICU (icu-uc), for the Unicode name search
 - fcitx5 or ibus
 
 ### Example Commands To Install Dependencies (probably)

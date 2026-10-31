@@ -59,6 +59,10 @@ set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${PROJECT_SOURCE_DIR}/postinst")
 
 include(FindPkgConfig)
 
+# Unicode character names: the search fallback asks ICU, which is where the
+# name table and the assigned-codepoint ranges live.
+pkg_check_modules(ICU REQUIRED IMPORTED_TARGET icu-uc)
+
 find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets)
 
 include_directories(${PROJECT_SOURCE_DIR}/src)
@@ -99,6 +103,8 @@ set(SRC_FILES_COMMON
   src/emojis.cpp
   src/emojis.qrc
   src/kaomojis.cpp
+  src/LeanSymbols.cpp
+  src/UnicodeSearch.cpp
   src/EmojiPickerSettings.cpp
   src/EmojiPickerWindow.cpp
   src/EmojiPickerWindow.qrc
@@ -143,6 +149,7 @@ if (NOT SKIP_IBUS)
     PkgConfig::IBus
     PkgConfig::GLib
     PkgConfig::GObject
+    PkgConfig::ICU
     ${HCCR_LIBRARIES}
   )
 
@@ -185,6 +192,7 @@ if (NOT SKIP_FCITX5)
     Qt5::Gui
     Qt5::Widgets
     Fcitx5::Core
+    PkgConfig::ICU
     ${HCCR_LIBRARIES}
   )
 
@@ -253,4 +261,14 @@ set_target_properties(picker-gui PROPERTIES
   CXX_STANDARD_REQUIRED ON
   CXX_EXTENSIONS OFF
 )
-target_link_libraries(picker-gui Qt5::Core Qt5::Gui Qt5::Widgets ${HCCR_LIBRARIES})
+target_link_libraries(picker-gui Qt5::Core Qt5::Gui Qt5::Widgets PkgConfig::ICU ${HCCR_LIBRARIES})
+
+# Search harness: prints what a query resolves to, and how long the Unicode
+# fallback takes, without an input method or a window.
+add_executable(search-verify tools/search-verify.cpp src/LeanSymbols.cpp src/UnicodeSearch.cpp src/EmojiPickerWindow.qrc)
+set_target_properties(search-verify PROPERTIES
+  CXX_STANDARD ${CXX_STANDARD_OVERRIDE}
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS OFF
+)
+target_link_libraries(search-verify Qt5::Core Qt5::Gui PkgConfig::ICU)
